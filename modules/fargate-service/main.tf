@@ -335,7 +335,7 @@ data "aws_iam_policy_document" "secret_read" {
 }
 
 resource "aws_iam_role_policy" "secret_read" {
-  name   = "secret-read"
+  name   = var.secret_read_policy_name
   role   = aws_iam_role.task_execution.id
   policy = data.aws_iam_policy_document.secret_read.json
 }

@@ -58,6 +58,12 @@ variable "secret_arns" {
   default     = []
 }
 
+variable "secret_read_policy_name" {
+  type        = string
+  description = "Inline policy name for the exec role's secret-read grant (override to preserve an existing name on adoption)."
+  default     = "secret-read"
+}
+
 variable "task_cpu" {
   type        = number
   description = "Fargate task CPU units (256 = 0.25 vCPU)."

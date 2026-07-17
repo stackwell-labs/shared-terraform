@@ -1,0 +1,129 @@
+name: build-lambda (reusable)
+
+# Builds the Rust Lambda zip(s) and uploads them as an artifact, WITHOUT
+# deploying. Pair it with terraform-deploy.yml's prebuilt_artifact_name input so
+# a caller can run this build IN PARALLEL with its test gate and have the deploy
+# job do only terraform — overlapping the (slow) release-musl build with tests
+# instead of running it strictly after them.
+#
+# The build steps here are intentionally identical to terraform-deploy.yml's
+# in-job build path (same toolchain, musl target, cargo cache workspace, and
+# private-git-dep token flow), so "how a Lambda is built" lives in one shape.
+#
+# Caller example (service repo .github/workflows/deploy.yml):
+#   jobs:
+#     test:
+#       uses: ./.github/workflows/test.yml
+#     build:                       # runs concurrently with test
+#       permissions: { contents: read }
+#       uses: stackwell-labs/shared-terraform/.github/workflows/build-lambda.yml@main
+#       with:
+#         cargo_workspace: "."
+#         build_script: scripts/build-all.sh
+#         artifact_source_path: target/lambda
+#         artifact_name: my-svc-lambda
+#     deploy:
+#       needs: [test, build]       # apply waits on BOTH; only apply gates on tests
+#       uses: stackwell-labs/shared-terraform/.github/workflows/terraform-deploy.yml@main
+#       with:
+#         prebuilt_artifact_name: my-svc-lambda
+#         prebuilt_artifact_path: target/lambda
+#         ...
+
+on:
+  workflow_call:
+    inputs:
+      cargo_workspace:
+        description: Path passed to rust-cache (the Cargo workspace dir).
+        required: false
+        type: string
+        default: backend
+      build_script:
+        description: Script that builds the Lambda bootstrap zip(s).
+        required: false
+        type: string
+        default: backend/scripts/build-lambda.sh
+      artifact_source_path:
+        description: >-
+          Directory (relative to the workspace) the build_script writes its
+          zip(s) into; uploaded as the artifact. The deploy job downloads it back
+          to the same relative path via terraform-deploy's prebuilt_artifact_path.
+        required: true
+        type: string
+      artifact_name:
+        description: Name of the uploaded artifact; pass the same value to terraform-deploy's prebuilt_artifact_name.
+        required: false
+        type: string
+        default: lambda-artifact
+      artifact_retention_days:
+        description: Retention for the uploaded artifact; short by default — it is consumed by the same run's deploy job.
+        required: false
+        type: number
+        default: 1
+      git_app_id:
+        description: If set, mint a short-lived GitHub App installation token to clone PRIVATE git deps (paired with git_app_private_key).
+        required: false
+        type: string
+        default: ""
+      git_app_owner:
+        description: Org whose App installation the token is minted against. Defaults to the calling repo's owner.
+        required: false
+        type: string
+        default: ""
+    secrets:
+      git_app_private_key:
+        description: PEM private key for git_app_id.
+        required: false
+      git_token:
+        description: Optional token for cloning PRIVATE git deps (fallback when no App is configured).
+        required: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: checkout
+        uses: actions/checkout@v4
+
+      - name: install rust + musl target
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
+
+      - name: install musl-tools
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      - name: cargo cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ${{ inputs.cargo_workspace }}
+
+      - name: mint git app token (private deps)
+        id: git_app_token
+        if: ${{ inputs.git_app_id != '' }}
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ inputs.git_app_id }}
+          private-key: ${{ secrets.git_app_private_key }}
+          owner: ${{ inputs.git_app_owner || github.repository_owner }}
+
+      - name: configure private git deps
+        env:
+          GIT_TOKEN: ${{ steps.git_app_token.outputs.token || secrets.git_token }}
+        run: |
+          if [ -n "${GIT_TOKEN:-}" ]; then
+            git config --global url."https://x-access-token:${GIT_TOKEN}@github.com/".insteadOf "https://github.com/"
+          fi
+
+      - name: build lambda zip
+        run: bash ${{ inputs.build_script }}
+
+      - name: upload lambda artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ inputs.artifact_name }}
+          path: ${{ inputs.artifact_source_path }}
+          retention-days: ${{ inputs.artifact_retention_days }}
+          if-no-files-found: error

@@ -97,6 +97,25 @@ on:
         required: false
         type: string
         default: ""
+      prebuilt_artifact_name:
+        description: >-
+          If set, SKIP the in-job Rust build (build_script, toolchain, musl,
+          cargo cache, git-dep clone) and instead download this artifact — the
+          Lambda zip(s) built by a PARALLEL job — into prebuilt_artifact_path.
+          This lets a caller overlap the (slow) build with its test gate so the
+          deploy job does only terraform. Leave empty for the default
+          build-in-job behavior.
+        required: false
+        type: string
+        default: ""
+      prebuilt_artifact_path:
+        description: >-
+          Directory (relative to the workspace) to extract the prebuilt artifact
+          into. Must match where the service's terraform reads its zip(s) — e.g.
+          target/lambda. Required when prebuilt_artifact_name is set.
+        required: false
+        type: string
+        default: ""
     secrets:
       tf_var_secrets:
         description: >-
@@ -124,15 +143,20 @@ jobs:
       - name: checkout
         uses: actions/checkout@v4
 
+      # --- Build steps: skipped entirely in prebuilt mode (a parallel job built
+      # the artifact and we download it below instead). ---
       - name: install rust + musl target
+        if: ${{ inputs.prebuilt_artifact_name == '' }}
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: x86_64-unknown-linux-musl
 
       - name: install musl-tools
+        if: ${{ inputs.prebuilt_artifact_name == '' }}
         run: sudo apt-get update && sudo apt-get install -y musl-tools
 
       - name: cargo cache
+        if: ${{ inputs.prebuilt_artifact_name == '' }}
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: ${{ inputs.cargo_workspace }}
@@ -142,7 +166,7 @@ jobs:
       # cross-job outputs). Falls back to the git_token secret otherwise.
       - name: mint git app token (private deps)
         id: git_app_token
-        if: ${{ inputs.git_app_id != '' }}
+        if: ${{ inputs.prebuilt_artifact_name == '' && inputs.git_app_id != '' }}
         uses: actions/create-github-app-token@v1
         with:
           app-id: ${{ inputs.git_app_id }}
@@ -150,6 +174,7 @@ jobs:
           owner: ${{ inputs.git_app_owner || github.repository_owner }}
 
       - name: configure private git deps
+        if: ${{ inputs.prebuilt_artifact_name == '' }}
         env:
           GIT_TOKEN: ${{ steps.git_app_token.outputs.token || secrets.git_token }}
         run: |
@@ -158,7 +183,17 @@ jobs:
           fi
 
       - name: build lambda zip
+        if: ${{ inputs.prebuilt_artifact_name == '' }}
         run: bash ${{ inputs.build_script }}
+
+      # Prebuilt mode: pull the zip(s) a parallel build job uploaded, into the
+      # directory the service's terraform reads them from.
+      - name: download prebuilt lambda artifact
+        if: ${{ inputs.prebuilt_artifact_name != '' }}
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ inputs.prebuilt_artifact_name }}
+          path: ${{ inputs.prebuilt_artifact_path }}
 
       - name: configure aws via oidc
         uses: aws-actions/configure-aws-credentials@v4

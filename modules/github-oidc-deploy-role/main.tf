@@ -7,6 +7,15 @@
 # The role's *permissions* are the caller's responsibility — pass the scoped
 # least-privilege policy as policy_json. The module owns only the trust
 # relationship, so each service keeps its own narrow blast radius.
+#
+# ONE exception, and it is the module's job, not the caller's: the module owns and
+# rewrites the trust policy, so it self-grants iam:UpdateAssumeRolePolicy on this
+# role's own ARN (see aws_iam_role_policy.trust_self_manage below). Callers must NOT
+# add that action to policy_json. NOTE on first adoption: if an EXISTING role's live
+# trust policy still needs to change when you upgrade to this version (e.g. it predates
+# the immutable-ID sub form) AND its old policy_json lacked the action, that first apply
+# can still 403 — grant iam:UpdateAssumeRolePolicy on the role out-of-band once, then
+# apply; every subsequent trust change self-heals.
 
 resource "aws_iam_openid_connect_provider" "github_actions" {
   count = var.create_oidc_provider ? 1 : 0
@@ -70,4 +79,27 @@ resource "aws_iam_role_policy" "scoped" {
   name   = "${var.role_name}-scoped"
   role   = aws_iam_role.deploy.id
   policy = var.policy_json
+}
+
+# Trust-policy self-management. This module OWNS and rewrites the role's
+# assume_role_policy (above): whenever the trust doc changes — e.g. the account
+# rolls to GitHub's immutable-ID `repo:org@*/name@*` sub form, or repo/branch
+# inputs change — `terraform apply` calls iam:UpdateAssumeRolePolicy on THIS role.
+# Callers used to have to remember to grant that action in their own policy_json;
+# forgetting it deadlocked the deploy (the apply that would grant the permission
+# 403s on the very action it needs). Since the module owns the trust relationship,
+# it grants itself the one action needed to maintain it — scoped to this role's own
+# ARN only, so no blast-radius expansion (the role can rewrite only its own trust).
+# Callers no longer need iam:UpdateAssumeRolePolicy in policy_json.
+resource "aws_iam_role_policy" "trust_self_manage" {
+  name = "${var.role_name}-trust-self-manage"
+  role = aws_iam_role.deploy.id
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect   = "Allow"
+      Action   = "iam:UpdateAssumeRolePolicy"
+      Resource = aws_iam_role.deploy.arn
+    }]
+  })
 }

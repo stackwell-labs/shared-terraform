@@ -94,6 +94,12 @@ variable "health_check_path" {
   default     = "/health"
 }
 
+variable "idle_timeout_seconds" {
+  type        = number
+  description = "ALB connection idle timeout. AWS's own ALB default (60s) is too short for a slow client upload (e.g. a large git push) that keeps sending bytes past a minute -- raise it per-service when that's a real workload, not just for cushion."
+  default     = 60
+}
+
 variable "log_retention_days" {
   type        = number
   description = "CloudWatch log retention."

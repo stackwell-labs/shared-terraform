@@ -139,6 +139,13 @@ on:
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    # A deploy that has not finished in 30 minutes is stuck, not slow: the
+    # healthy path is ~10 min end-to-end (8 of them the cargo build). Without
+    # this, a hung step inherits GitHub's 6-HOUR job default and the deploy
+    # sits there holding the `deploy-live` concurrency group -- silently, with
+    # no failure to react to. Observed 2026-08-19: granite run 32223214462 sat
+    # on one step for 6h00m45s. Fail loudly instead so a re-run is possible.
+    timeout-minutes: 30
     steps:
       - name: checkout
         uses: actions/checkout@v4
@@ -153,6 +160,13 @@ jobs:
 
       - name: install musl-tools
         if: ${{ inputs.prebuilt_artifact_name == '' }}
+        # THIS is the step that hangs when an apt mirror stalls -- it is the
+        # only unbounded network fetch before the build. Healthy runs take
+        # 17-47s; wedged runs took 2h54m and 6h00m. 5 minutes is ~6x the worst
+        # healthy observation, so a timeout here means the mirror is bad, not
+        # that we were impatient. Fails the job fast and retriably rather than
+        # burning the job's whole budget.
+        timeout-minutes: 5
         run: sudo apt-get update && sudo apt-get install -y musl-tools
 
       - name: cargo cache

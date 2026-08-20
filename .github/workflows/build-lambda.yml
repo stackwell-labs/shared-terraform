@@ -81,6 +81,10 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    # Same reasoning as terraform-deploy.yml: bound the job so a hung step
+    # fails in minutes instead of inheriting GitHub's 6-hour default. A build
+    # that has not produced a zip in 30 minutes is stuck (healthy: ~10 min).
+    timeout-minutes: 30
     permissions:
       contents: read
     steps:
@@ -93,6 +97,10 @@ jobs:
           targets: x86_64-unknown-linux-musl
 
       - name: install musl-tools
+        # The unbounded network fetch that wedged granite's deploy job twice on
+        # 2026-08-19 (6h00m and 2h54m on an apt mirror stall). Healthy: 17-47s.
+        # Kept identical to the copy in terraform-deploy.yml.
+        timeout-minutes: 5
         run: sudo apt-get update && sudo apt-get install -y musl-tools
 
       - name: cargo cache

@@ -107,6 +107,16 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: ${{ inputs.cargo_workspace }}
+          # SAVE only from the default branch; every ref still RESTORES from it.
+          # GitHub caps Actions cache at 10 GB/repo and evicts LRU above that.
+          # Measured 2026-08-25: drive 11.67 GB / 24 entries and
+          # agent-platform--tests 10.03 GB / 18 were both OVER, so those repos were
+          # evicting their own caches and rebuilding cold. Much of the pressure was
+          # branch-scoped copies nothing can read -- a PR's cache is visible only to
+          # that PR -- which spend the budget and evict main's entry, the one every
+          # branch does read. Deploy runs from main, so this is the branch that
+          # matters here anyway.
+          save-if: ${{ github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
 
       - name: mint git app token (private deps)
         id: git_app_token

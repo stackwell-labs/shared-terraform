@@ -20,7 +20,25 @@ variable "domain_name" {
 
 variable "parent_zone_id" {
   type        = string
-  description = "Route53 zone id of the parent zone (in the aws.parent_dns account) to write the NS delegation into."
+  description = <<-EOT
+    Route53 zone id of the parent zone (in the aws.parent_dns account) to write
+    the NS delegation into. EMPTY ("") means this module does not manage the
+    delegation at all — the record is expected to exist already, maintained out
+    of band, which is what every non-Fargate service on this platform already
+    does with parent-zone records.
+
+    Why the escape hatch exists: the delegation is the ONLY resource here that
+    lives in another AWS account, so it alone decides whether a consumer can run
+    terraform from CI. Keeping it forces the consumer's CI role to hold
+    write access to the parent zone — for amber-git, the zone that also carries
+    socialgraph, jot and docs — to manage one NS record that is written once and
+    then never changes. Empty lets a consumer trade that standing authority for
+    an out-of-band record.
+
+    Existing callers pass a real zone id and are unaffected: the delegation is
+    created exactly as before.
+  EOT
+  default     = ""
 }
 
 variable "container_name" {

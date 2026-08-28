@@ -163,7 +163,11 @@ resource "aws_route53_zone" "this" {
   name = var.domain_name
 }
 
+# Skipped entirely when parent_zone_id is "" — see the variable's description.
+# This is the one resource in the module that touches another AWS account, so it
+# is the one that decides whether a consumer can run terraform in CI.
 resource "aws_route53_record" "delegation" {
+  count    = var.parent_zone_id == "" ? 0 : 1
   provider = aws.parent_dns
   zone_id  = var.parent_zone_id
   name     = var.domain_name

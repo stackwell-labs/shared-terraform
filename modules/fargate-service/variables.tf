@@ -37,8 +37,10 @@ variable "parent_zone_id" {
 
     Existing callers pass a real zone id and are unaffected: the delegation is
     created exactly as before.
+
+    Deliberately has NO default: omitting it must be a plan-time error, not a
+    silently undelegated domain.
   EOT
-  default     = ""
 }
 
 variable "container_name" {

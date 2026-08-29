@@ -295,6 +295,17 @@ resource "aws_ecs_service" "this" {
   desired_count   = var.desired_count
   launch_type     = "FARGATE"
 
+  # A failed deploy should undo itself. Without this, ECS retries the broken
+  # task forever and the service sits on the old (or no) container until a human
+  # notices -- which for a single-task service means an outage that ends when
+  # someone happens to look. Enabled for every consumer deliberately: there is no
+  # deployment where "keep trying the image that will not start" is preferable to
+  # going back to the one that was serving.
+  deployment_circuit_breaker {
+    enable   = true
+    rollback = true
+  }
+
   network_configuration {
     subnets          = aws_subnet.public[*].id
     security_groups  = [aws_security_group.service.id]

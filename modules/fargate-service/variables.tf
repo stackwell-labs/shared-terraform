@@ -56,8 +56,39 @@ variable "container_port" {
 
 variable "image_tag" {
   type        = string
-  description = "Image tag in the created ECR repo."
+  description = <<-EOT
+    Image tag in the created ECR repo. Used ONLY when image_digest is empty.
+
+    A tag is a mutable name: the task definition resolves it at every fresh task
+    launch, so what is running is decided by WHEN a task happened to start rather
+    than by what anyone deployed. Prefer image_digest.
+  EOT
   default     = "latest"
+}
+
+variable "image_digest" {
+  type        = string
+  description = <<-EOT
+    Immutable image digest ("sha256:<64 hex>"). When set, the task definition
+    references the content-addressed image and image_tag is ignored.
+
+    This is what makes a deployment a RECORDED DECISION rather than a name
+    lookup. With a mutable tag there is a window -- push succeeds, the ECS update
+    fails -- in which the tag points at code no deploy ever verified, and the
+    next crash restart silently adopts it. A digest cannot be reassigned, so that
+    state stops being representable.
+
+    Empty keeps the historical tag behaviour, so adopting this is opt-in per
+    consumer.
+  EOT
+  default     = ""
+
+  validation {
+    # Catch a malformed digest at PLAN time. Otherwise the first symptom is a
+    # task that cannot pull its image, discovered during a deploy.
+    condition     = var.image_digest == "" || can(regex("^sha256:[0-9a-f]{64}$", var.image_digest))
+    error_message = "image_digest must be empty or a full digest of the form sha256:<64 lowercase hex>."
+  }
 }
 
 variable "environment" {

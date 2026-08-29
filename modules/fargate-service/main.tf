@@ -20,8 +20,10 @@ locals {
   # equivalent to an absent one), so a stateless service passing mount_points=[]
   # stays byte-equivalent to one that never had the key.
   container = {
-    name         = var.container_name
-    image        = "${aws_ecr_repository.this.repository_url}:${var.image_tag}"
+    name = var.container_name
+    # A digest pins the exact bytes; a tag is resolved fresh at every task
+    # launch. See variable "image_digest" for why that difference matters.
+    image        = var.image_digest != "" ? "${aws_ecr_repository.this.repository_url}@${var.image_digest}" : "${aws_ecr_repository.this.repository_url}:${var.image_tag}"
     essential    = true
     portMappings = [{ containerPort = var.container_port, protocol = "tcp" }]
     environment  = var.environment

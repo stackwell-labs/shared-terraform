@@ -68,6 +68,48 @@ In an account that already has the GitHub OIDC provider, set
 
 Outputs: `role_arn`, `role_name`, `oidc_provider_arn`.
 
+### `alarms-to-shriek`
+
+Routes every CloudWatch alarm in an account to Shriek, which pages a phone:
+an EventBridge rule on the default bus matches `CloudWatch Alarm State Change`
+(ALARM and OK only) and forwards it to Shriek's bus through a role that can
+only `events:PutEvents` there. Shriek opens a Critical incident on ALARM and
+resolves it on OK.
+
+```mermaid
+flowchart LR
+  A[CloudWatch alarm] -->|state change event| B[default bus, product acct]
+  B -->|rule + role| C[default bus, shriek acct 653135933102]
+  C -->|rule| D[shriek-service-tick]
+  D -->|Critical incident| E[FCM push]
+```
+
+Existing SNS/email actions are left alone, and alarms added later are covered
+without any change here.
+
+```hcl
+module "alarms_to_shriek" {
+  source      = "git::https://github.com/stackwell-labs/shared-terraform.git//modules/alarms-to-shriek?ref=v0.9.0"
+  name_prefix = var.app_name
+  tags        = local.common_tags
+}
+```
+
+Use it **once per account**, because the rule forwards every alarm in the
+account. The account must also be listed in Shriek's `alarm_source_accounts`
+(`stackwell-labs/shriek`, `service/infra/aws/variables.tf`). Shriek's bus policy
+refuses accounts that are not listed, and the map gives each account its board
+row name.
+
+A CI deploy role applying this needs `events:{PutRule,DescribeRule,DeleteRule,
+PutTargets,RemoveTargets,ListTargetsByRule,TagResource,UntagResource,
+ListTagsForResource}` on the rule, and `iam:{CreateRole,GetRole,DeleteRole,
+TagRole,UntagRole,PutRolePolicy,GetRolePolicy,DeleteRolePolicy,
+ListRolePolicies,ListAttachedRolePolicies,ListInstanceProfilesForRole,PassRole}`
+on the `<name_prefix>-alarms-to-shriek` role.
+
+Outputs: `rule_arn`, `role_arn`.
+
 ## Versioning
 
 Tagged releases (`vMAJOR.MINOR.PATCH`). Consumers pin via `?ref=vX.Y.Z`.

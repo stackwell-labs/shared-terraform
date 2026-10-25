@@ -10,6 +10,11 @@
 #
 # Only ALARM and OK are forwarded. Shriek opens a Critical incident (a phone
 # push) on ALARM and resolves it on OK; INSUFFICIENT_DATA carries no verdict.
+#
+# var.exclude_alarm_names drops alarms by name, for an account that also holds
+# alarms nobody should be woken for (the 081 data vault's test-plane tables).
+# The filter runs here, at the source, so an excluded alarm never leaves the
+# account and Shriek needs no knowledge of it.
 
 data "aws_caller_identity" "current" {}
 
@@ -20,9 +25,14 @@ resource "aws_cloudwatch_event_rule" "alarms" {
     source        = ["aws.cloudwatch"]
     "detail-type" = ["CloudWatch Alarm State Change"]
     account       = [data.aws_caller_identity.current.account_id]
-    detail = {
-      state = { value = ["ALARM", "OK"] }
-    }
+    detail = merge(
+      { state = { value = ["ALARM", "OK"] } },
+      # Only present when exclusions are set, so an instance without them keeps
+      # exactly the v0.9.0 pattern (and a version bump plans no change).
+      length(var.exclude_alarm_names) == 0 ? {} : {
+        alarmName = [{ "anything-but" = { wildcard = var.exclude_alarm_names } }]
+      },
+    )
   })
   tags = var.tags
 }

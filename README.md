@@ -95,6 +95,17 @@ module "alarms_to_shriek" {
 }
 ```
 
+To keep some alarms off the phone, pass EventBridge wildcard patterns of alarm
+names to leave out. They are dropped at the source, so they never reach Shriek:
+
+```hcl
+  exclude_alarm_names = ["t_*_test_*"] # the 081 vault's test-plane tables
+```
+
+Without it, the rule's pattern is exactly v0.9.0's, so bumping the ref plans
+no change. The provider constraint is `>= 5.0, < 7.0`, so roots on AWS provider
+5.x and 6.x can both use it.
+
 Use it **once per account**, because the rule forwards every alarm in the
 account. The account must also be listed in Shriek's `alarm_source_accounts`
 (`stackwell-labs/shriek`, `service/infra/aws/variables.tf`). Shriek's bus policy

@@ -1,0 +1,48 @@
+# amber-ci jobs for shared-terraform (spec: stackwell-labs/amber-ci
+# docs/design.md §2; how to onboard: docs/onboarding.md there).
+#
+# Both workflows here are reusable (workflow_call), so nothing checks this
+# repo on PR. These jobs check the modules. They never plan against or apply
+# to AWS and use no credentials.
+#   validate = per module: `init -backend=false`, `validate`, and `terraform
+#              test` where it has *.tftest.hcl (mocked provider)
+#              (.amber/validate-modules.sh)
+#   fmt      = `terraform fmt -check -recursive`
+#
+# fmt is advisory (a failure reports neutral) because main fails it today:
+# modules/fargate-service/versions.tf has one misaligned `=`
+# (`terraform fmt` fixes it). Make it required once main passes.
+#
+# Terraform 1.10.5, the version calendar's deploy uses. The modules' tests
+# use mock_provider, which needs >= 1.7, and 1.6.6 (terraform-deploy.yml's
+# default) cannot even `init` a module with that test file in it. So this
+# does not prove that the modules still work on 1.6.6.
+#
+# validate does not reuse: the repo commits no .terraform.lock.hcl, so `init`
+# picks the newest provider each constraint allows, and a result depends on
+# the registry as well as on the tree. It keeps the network for `init`; the
+# plugin cache only saves downloads. fmt reads nothing but the tree, so it
+# reuses and needs no network.
+
+version = 1
+
+[job.validate]
+image = "docker.io/hashicorp/terraform:1.10.5@sha256:679ac5e095bf550bc726742cd12efa6050f0913080df479fdabfeb202953af28"
+run = [
+  "mkdir -p \"$TF_PLUGIN_CACHE_DIR\"",
+  "sh .amber/validate-modules.sh",
+]
+required_for_main = true
+timeout_minutes = 15
+cache = "terraform-1.10.5"
+
+[job.validate.env]
+TF_IN_AUTOMATION = "1"
+TF_PLUGIN_CACHE_DIR = "/cache/plugins"
+
+[job.fmt]
+image = "docker.io/hashicorp/terraform:1.10.5@sha256:679ac5e095bf550bc726742cd12efa6050f0913080df479fdabfeb202953af28"
+run = ["terraform fmt -check -recursive -diff"]
+required_for_main = false
+reuse = true
+timeout_minutes = 5

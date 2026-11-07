@@ -35,9 +35,12 @@ on:
         type: string
         default: us-east-1
       terraform_version:
+        # 1.10.5: the box's version (devbox#5) and this repo's checks'.
+        # 1.6/1.7 plan a phantom in-place update on every resource with
+        # sensitive attributes (shared-terraform#4).
         required: false
         type: string
-        default: "1.6.6"
+        default: "1.10.5"
       cargo_workspace:
         description: Path passed to rust-cache (the Cargo workspace dir).
         required: false

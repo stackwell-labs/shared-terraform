@@ -13,10 +13,9 @@
 # modules/fargate-service/versions.tf has one misaligned `=`
 # (`terraform fmt` fixes it). Make it required once main passes.
 #
-# Terraform 1.10.5, the version calendar's deploy uses. The modules' tests
-# use mock_provider, which needs >= 1.7, and 1.6.6 (terraform-deploy.yml's
-# default) cannot even `init` a module with that test file in it. So this
-# does not prove that the modules still work on 1.6.6.
+# Terraform 1.10.5, terraform-deploy.yml's default. The modules' tests use
+# mock_provider, which needs >= 1.7, so these checks do not prove that the
+# modules still work on a caller that pins an older terraform_version.
 #
 # validate does not reuse: the repo commits no .terraform.lock.hcl, so `init`
 # picks the newest provider each constraint allows, and a result depends on

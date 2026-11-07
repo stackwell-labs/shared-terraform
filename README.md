@@ -56,7 +56,7 @@ applies, with `lambda-execution-role`, and pass its ARN in:
 ```hcl
 # IAM root, applied by an admin
 module "lambda_role" {
-  source = "git::https://github.com/stackwell-labs/shared-terraform.git//modules/lambda-execution-role?ref=v0.11.0"
+  source = "git::https://github.com/stackwell-labs/shared-terraform.git//modules/lambda-execution-role?ref=v0.12.0"
 
   app_name                = "granite"
   aws_region              = var.aws_region
@@ -65,7 +65,7 @@ module "lambda_role" {
 
 # CI root
 module "service" {
-  source   = "git::https://github.com/stackwell-labs/shared-terraform.git//modules/rust-lambda-service?ref=v0.11.0"
+  source   = "git::https://github.com/stackwell-labs/shared-terraform.git//modules/rust-lambda-service?ref=v0.12.0"
   app_name = "granite"
   role_arn = "arn:aws:iam::123456789012:role/granite-lambda-role" # the IAM root's role_arn output
   # ...no extra_policy_statements: passing both is an error...
@@ -74,7 +74,7 @@ module "service" {
 
 With `role_arn` set the module creates no IAM, and the CI role needs only
 `iam:GetRole` and `iam:PassRole` on that role. Without it, bumping the ref from
-v0.2.0–v0.10.0 plans no change: `moved` blocks carry the role and policy into
+v0.2.0–v0.11.0 plans no change: `moved` blocks carry the role and policy into
 `module.execution_role[0]`. A root that switches an existing role to
 `role_arn` plans to delete it, so first take the role and policy out of its
 state (`terraform state rm` on `module.<name>.module.execution_role[0]`) and

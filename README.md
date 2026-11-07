@@ -47,6 +47,48 @@ module "service" {
 Outputs: `lambda_function_url`, `lambda_function_name`, `lambda_function_arn`,
 `lambda_invoke_arn`, `lambda_role_arn`, `lambda_role_name`, `log_group_name`.
 
+**A role managed elsewhere.** By default the module creates the execution role
+`<app_name>-lambda-role` and its policy, so the root applying it needs IAM
+write on that role. If CI applies that root, a landed commit could then grant
+the Lambda anything. To keep IAM out of CI, create the role in a root an admin
+applies, with `lambda-execution-role`, and pass its ARN in:
+
+```hcl
+# IAM root, applied by an admin
+module "lambda_role" {
+  source = "git::https://github.com/stackwell-labs/shared-terraform.git//modules/lambda-execution-role?ref=v0.11.0"
+
+  app_name                = "granite"
+  aws_region              = var.aws_region
+  extra_policy_statements = [ /* what the service's Lambda may touch */ ]
+}
+
+# CI root
+module "service" {
+  source   = "git::https://github.com/stackwell-labs/shared-terraform.git//modules/rust-lambda-service?ref=v0.11.0"
+  app_name = "granite"
+  role_arn = "arn:aws:iam::057029159591:role/granite-lambda-role" # the IAM root's role_arn output
+  # ...no extra_policy_statements: passing both is an error...
+}
+```
+
+With `role_arn` set the module creates no IAM, and the CI role needs only
+`iam:GetRole` and `iam:PassRole` on that role. Without it, bumping the ref from
+v0.2.0–v0.10.0 plans no change: `moved` blocks carry the role and policy into
+`module.execution_role[0]`. A root that switches an existing role to
+`role_arn` plans to delete it, so first take the role and policy out of its
+state (`terraform state rm` on `module.<name>.module.execution_role[0]`) and
+import them into the IAM root.
+
+### `lambda-execution-role`
+
+Only the execution role and its inline policy: the CloudWatch Logs grants
+for `/aws/lambda/<app_name>` plus `extra_policy_statements`. Used by
+`rust-lambda-service` when no `role_arn` is given, and by an IAM root directly.
+Inputs `app_name`, `aws_region`, `extra_policy_statements`, `tags`.
+
+Outputs: `role_arn`, `role_name`.
+
 ### `github-oidc-deploy-role`
 
 The GitHub Actions OIDC provider + a scoped deploy role assumable only by one

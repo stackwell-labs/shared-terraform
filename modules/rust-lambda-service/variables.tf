@@ -1,5 +1,5 @@
 variable "app_name" {
-  description = "Resource name prefix. The Lambda function, IAM role, log group, and CloudFormation workaround stack are all named from this."
+  description = "Resource name prefix. The Lambda function, IAM role (unless role_arn is set), log group, and CloudFormation workaround stack are all named from this."
   type        = string
 }
 
@@ -26,8 +26,19 @@ variable "aws_region" {
   default     = "us-east-1"
 }
 
+variable "role_arn" {
+  description = "ARN of an existing execution role for the function. Null (the default) makes the module create <app_name>-lambda-role and its policy (via lambda-execution-role). When set, the module creates no IAM at all, so the root applying it needs no IAM write; extra_policy_statements must then be empty. Must be known at plan time (a literal, a variable, or another root's output), since it decides whether the role is created."
+  type        = string
+  default     = null
+
+  validation {
+    condition     = var.role_arn == null || can(regex("^arn:aws[a-z-]*:iam::[0-9]{12}:role/([^/]+/)*[^/]+$", var.role_arn))
+    error_message = "role_arn must be an IAM role ARN, arn:aws:iam::<12-digit account>:role/<name>."
+  }
+}
+
 variable "extra_policy_statements" {
-  description = "Additional IAM policy statements merged into the Lambda execution role's inline policy (e.g. DynamoDB, S3, KMS access). Each element is a statement object as it would appear in an IAM policy document's Statement array."
+  description = "Additional IAM policy statements merged into the Lambda execution role's inline policy (e.g. DynamoDB, S3, KMS access). Each element is a statement object as it would appear in an IAM policy document's Statement array. Only with role_arn = null; with role_arn they belong on that role."
   type        = list(any)
   default     = []
 }

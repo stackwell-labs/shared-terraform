@@ -5,7 +5,7 @@
 # that event rather than on each alarm's SNS topic means:
 #   * an alarm added later pages without anyone remembering to wire it;
 #   * existing SNS/email actions are untouched (this is additive);
-#   * the producer holds no credential: authority is the IAM role below plus
+#   * the producer holds no credential: authority is the forwarding role plus
 #     Shriek's bus policy naming this account.
 #
 # Only ALARM and OK are forwarded. Shriek opens a Critical incident (a phone
@@ -37,40 +37,37 @@ resource "aws_cloudwatch_event_rule" "alarms" {
   tags = var.tags
 }
 
-# EventBridge requires a role on every cross-account event-bus target created
-# after 2023-03-02. It can do exactly one thing: put events on Shriek's bus.
-resource "aws_iam_role" "forward" {
-  name = "${var.name_prefix}-alarms-to-shriek"
-  assume_role_policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [{
-      Effect    = "Allow"
-      Principal = { Service = "events.amazonaws.com" }
-      Action    = "sts:AssumeRole"
-      Condition = {
-        StringEquals = { "aws:SourceAccount" = data.aws_caller_identity.current.account_id }
-      }
-    }]
-  })
-  tags = var.tags
+# EventBridge requires a role on every cross-account event-bus target. Without
+# var.role_arn this instance creates it (the alarms-to-shriek-role module);
+# with it, this instance creates no IAM at all, so its applier needs no IAM
+# write (shared-terraform#2).
+module "role" {
+  count  = var.role_arn == null ? 1 : 0
+  source = "../alarms-to-shriek-role"
+
+  name_prefix          = var.name_prefix
+  shriek_event_bus_arn = var.shriek_event_bus_arn
+  tags                 = var.tags
 }
 
-resource "aws_iam_role_policy" "forward" {
-  name = "put-events-on-shriek-bus"
-  role = aws_iam_role.forward.id
-  policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [{
-      Effect   = "Allow"
-      Action   = "events:PutEvents"
-      Resource = var.shriek_event_bus_arn
-    }]
-  })
+# Up to v0.10.0 the role lived here; these keep a ref bump a no-op.
+moved {
+  from = aws_iam_role.forward
+  to   = module.role[0].aws_iam_role.forward
+}
+
+moved {
+  from = aws_iam_role_policy.forward
+  to   = module.role[0].aws_iam_role_policy.forward
+}
+
+locals {
+  role_arn = var.role_arn == null ? module.role[0].role_arn : var.role_arn
 }
 
 resource "aws_cloudwatch_event_target" "shriek" {
   rule      = aws_cloudwatch_event_rule.alarms.name
   target_id = "shriek"
   arn       = var.shriek_event_bus_arn
-  role_arn  = aws_iam_role.forward.arn
+  role_arn  = local.role_arn
 }

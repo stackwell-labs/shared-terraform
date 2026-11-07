@@ -4,6 +4,6 @@ output "rule_arn" {
 }
 
 output "role_arn" {
-  description = "ARN of the forwarding role (the CI deploy role needs iam:PassRole on it)."
-  value       = aws_iam_role.forward.arn
+  description = "ARN of the forwarding role the target uses: var.role_arn if set, else the one this instance created (the CI deploy role needs iam:PassRole on it either way)."
+  value       = local.role_arn
 }

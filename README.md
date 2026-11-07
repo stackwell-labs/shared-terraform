@@ -119,7 +119,42 @@ TagRole,UntagRole,PutRolePolicy,GetRolePolicy,DeleteRolePolicy,
 ListRolePolicies,ListAttachedRolePolicies,ListInstanceProfilesForRole,PassRole}`
 on the `<name_prefix>-alarms-to-shriek` role.
 
-Outputs: `rule_arn`, `role_arn`.
+That IAM write lets whatever applies the root rewrite the role's trust and
+policy. To keep it out of a CI-applied root, make the role in a root that an
+admin applies, with the role-only module `alarms-to-shriek-role`, and pass its
+ARN in. The module then creates no IAM, and the CI role needs only
+`iam:PassRole` on the role (plus the `events:*` above):
+
+```hcl
+# admin-applied root
+module "alarms_to_shriek_role" {
+  source      = "git::https://github.com/stackwell-labs/shared-terraform.git//modules/alarms-to-shriek-role?ref=v0.11.0"
+  name_prefix = var.app_name
+}
+
+# CI-applied root
+module "alarms_to_shriek" {
+  source      = "git::https://github.com/stackwell-labs/shared-terraform.git//modules/alarms-to-shriek?ref=v0.11.0"
+  name_prefix = var.app_name
+  role_arn    = "arn:aws:iam::<account>:role/<app_name>-alarms-to-shriek"
+}
+```
+
+`role_arn` must be known at plan time (a literal or a remote-state output),
+because it decides whether the role is created. Without it, the module calls
+`alarms-to-shriek-role` itself, so the role's trust and permission live in one
+place either way, and `moved` blocks make a bump from v0.9.0/v0.10.0 plan no
+change.
+
+To hand an existing instance's role to another root, move it before setting
+`role_arn`, or the CI root plans to destroy it: import it into the admin root
+(`module.alarms_to_shriek_role.aws_iam_role.forward`, ID
+`<app_name>-alarms-to-shriek`, and `...aws_iam_role_policy.forward`, ID
+`<app_name>-alarms-to-shriek:put-events-on-shriek-bus`), then
+`terraform state rm module.alarms_to_shriek.module.role` in the CI root.
+
+Outputs: `rule_arn`, `role_arn` (the role the target uses, given or created).
+`alarms-to-shriek-role` outputs `role_arn`, `role_name`.
 
 ## Versioning
 

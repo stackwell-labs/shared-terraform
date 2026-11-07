@@ -67,7 +67,7 @@ module "lambda_role" {
 module "service" {
   source   = "git::https://github.com/stackwell-labs/shared-terraform.git//modules/rust-lambda-service?ref=v0.11.0"
   app_name = "granite"
-  role_arn = "arn:aws:iam::057029159591:role/granite-lambda-role" # the IAM root's role_arn output
+  role_arn = "arn:aws:iam::123456789012:role/granite-lambda-role" # the IAM root's role_arn output
   # ...no extra_policy_statements: passing both is an error...
 }
 ```

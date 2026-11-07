@@ -108,6 +108,12 @@ module "ci_deploy" {
 In an account that already has the GitHub OIDC provider, set
 `create_oidc_provider = false` and pass `oidc_provider_arn`.
 
+The module grants the role `iam:UpdateAssumeRolePolicy` on itself, so a role
+that applies its own root can keep its trust up to date. When someone else
+applies the role (an admin-applied root), set `trust_self_manage = false`:
+there the grant would only let CI change who may assume the role. A `moved`
+block makes a bump from v0.5.0 on the default plan no change.
+
 Outputs: `role_arn`, `role_name`, `oidc_provider_arn`.
 
 ### `alarms-to-shriek`

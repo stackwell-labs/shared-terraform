@@ -52,3 +52,9 @@ variable "thumbprint_list" {
     "1c58a3a8518e8759bf075b76b750d4f2df264fcd",
   ]
 }
+
+variable "trust_self_manage" {
+  description = "Whether to grant the role iam:UpdateAssumeRolePolicy on itself, so a role that applies its own root can keep its trust up to date. Set false when someone other than the role applies it (e.g. an admin-applied root): there the grant only lets CI change who may assume the role."
+  type        = bool
+  default     = true
+}

@@ -48,6 +48,13 @@ Outputs: `lambda_function_url`, `lambda_function_name`, `lambda_function_arn`,
 `lambda_invoke_arn`, `lambda_role_arn`, `lambda_role_name`, `log_group_name`,
 `config_secret_arn`, `config_secret_read_statement`.
 
+**No Function URL** (v0.15.0, pigeon#79). A service fronted by an API Gateway
+passes `function_url = false`: the module then creates no Function URL and no
+public-invoke permission (nor their CloudFormation stack), so the gateway, and
+its throttle, is the only way in. `lambda_function_url` is then null, and
+`function_url_cors` must stay unset. With the default (`true`) nothing changes:
+`moved` blocks carry the three resources to their new `[0]` addresses.
+
 **The config secret** (v0.14.0, shared-terraform#5). `config_secret` wires the
 service's one Secrets Manager secret per plane (protocols
 `docs/adr-secret-storage.md`), which shared-rust's `platform-secrets` reads at

@@ -102,6 +102,12 @@ variable "log_retention_days" {
   default     = 14
 }
 
+variable "function_url" {
+  description = "Create the public Lambda Function URL and its public-invoke permissions (the default). Set false when another ingress, such as an API Gateway, fronts the function, so the function has no second public path."
+  type        = bool
+  default     = true
+}
+
 variable "function_url_cors" {
   description = "Optional CORS configuration for the Lambda Function URL. Null disables CORS (the default). When set, all four fields are required."
   type = object({

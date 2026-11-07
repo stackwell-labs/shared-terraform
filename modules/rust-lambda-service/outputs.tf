@@ -1,6 +1,6 @@
 output "lambda_function_url" {
-  description = "Direct Lambda Function URL."
-  value       = aws_lambda_function_url.this.function_url
+  description = "Direct Lambda Function URL, or null when function_url is false."
+  value       = var.function_url ? aws_lambda_function_url.this[0].function_url : null
 }
 
 output "lambda_function_name" {

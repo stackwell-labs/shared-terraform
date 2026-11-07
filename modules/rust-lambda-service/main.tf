@@ -133,13 +133,25 @@ resource "aws_lambda_function" "this" {
     }
 
     precondition {
+      # CORS configures the Function URL, so without one it would do nothing.
+      condition     = var.function_url || var.function_url_cors == null
+      error_message = "function_url_cors has no effect when function_url is false: there is no Function URL to configure."
+    }
+
+    precondition {
       condition     = var.config_secret == null ? true : !contains(keys(var.env), var.config_secret.env_var)
       error_message = "env already sets config_secret.env_var; the module sets it to the config secret's ARN, so drop it from env."
     }
   }
 }
 
+# The public Function URL and its two public-invoke permissions, unless the
+# caller turns them off (function_url = false) because another ingress, such as
+# an API Gateway, fronts the function. Off, the function has no second public
+# path that bypasses that ingress's throttle.
 resource "aws_lambda_function_url" "this" {
+  count = var.function_url ? 1 : 0
+
   function_name      = aws_lambda_function.this.function_name
   authorization_type = "NONE"
 
@@ -156,6 +168,8 @@ resource "aws_lambda_function_url" "this" {
 }
 
 resource "aws_lambda_permission" "function_url_public" {
+  count = var.function_url ? 1 : 0
+
   statement_id           = "AllowPublicFunctionUrlInvoke"
   action                 = "lambda:InvokeFunctionUrl"
   function_name          = aws_lambda_function.this.function_name
@@ -167,6 +181,8 @@ resource "aws_lambda_permission" "function_url_public" {
 # InvokedViaFunctionUrl condition that AWS requires for public Function URL
 # invocation, so a CloudFormation stack manages that one permission.
 resource "aws_cloudformation_stack" "function_url_invoke_public" {
+  count = var.function_url ? 1 : 0
+
   name = "${var.app_name}-function-url-invoke-public"
 
   template_body = jsonencode({
@@ -187,4 +203,21 @@ resource "aws_cloudformation_stack" "function_url_invoke_public" {
   depends_on = [aws_lambda_function_url.this]
 
   tags = local.common_tags
+}
+
+# Before function_url these three were single resources. These keep a caller
+# that leaves function_url on at no change.
+moved {
+  from = aws_lambda_function_url.this
+  to   = aws_lambda_function_url.this[0]
+}
+
+moved {
+  from = aws_lambda_permission.function_url_public
+  to   = aws_lambda_permission.function_url_public[0]
+}
+
+moved {
+  from = aws_cloudformation_stack.function_url_invoke_public
+  to   = aws_cloudformation_stack.function_url_invoke_public[0]
 }

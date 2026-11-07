@@ -43,6 +43,41 @@ variable "extra_policy_statements" {
   default     = []
 }
 
+variable "config_secret" {
+  description = <<-EOT
+    The service's adr-secret-storage config secret (one JSON secret per service per plane, read at cold start by shared-rust's platform-secrets). Null (the default) wires none. Give env_var, the Lambda env var that carries the secret's ARN (e.g. "DRIVE_CONFIG_SECRET"), and exactly one of:
+    - plane = "live" or "test": the module creates the secret "<service>/<plane>-config" (service must be set) with no secret version, so no value is ever in state; values are written out of band (platform-secrets scripts/put-config-key.sh).
+    - arn: an existing secret to use as is (one that already exists, or another function's config_secret_arn output, to share a service's secret). It may be unknown at plan time.
+    With role_arn = null the module grants the role secretsmanager:GetSecretValue on the secret. With role_arn set it grants nothing: put config_secret_read_statement on the role where it is managed.
+  EOT
+  type = object({
+    env_var = string
+    plane   = optional(string)
+    arn     = optional(string)
+  })
+  default = null
+
+  validation {
+    condition     = var.config_secret == null ? true : can(regex("^[A-Za-z][A-Za-z0-9_]*$", var.config_secret.env_var))
+    error_message = "config_secret.env_var must be a Lambda environment variable name: a letter, then letters, digits or underscores."
+  }
+
+  validation {
+    condition     = var.config_secret == null ? true : (var.config_secret.plane == null) != (var.config_secret.arn == null)
+    error_message = "config_secret takes exactly one of plane (create <service>/<plane>-config) or arn (use an existing secret)."
+  }
+
+  validation {
+    condition     = try(var.config_secret.plane, null) == null ? true : contains(["live", "test"], var.config_secret.plane)
+    error_message = "config_secret.plane must be \"live\" or \"test\" (adr-secret-storage's <service>/live-config and <service>/test-config)."
+  }
+
+  validation {
+    condition     = try(var.config_secret.arn, null) == null ? true : can(regex("^arn:aws[a-z-]*:secretsmanager:[a-z0-9-]+:[0-9]{12}:secret:.+$", var.config_secret.arn))
+    error_message = "config_secret.arn must be a Secrets Manager secret ARN, arn:aws:secretsmanager:<region>:<12-digit account>:secret:<name>."
+  }
+}
+
 variable "lambda_memory_size" {
   description = "Lambda memory size in MB."
   type        = number

@@ -45,7 +45,38 @@ module "service" {
 ```
 
 Outputs: `lambda_function_url`, `lambda_function_name`, `lambda_function_arn`,
-`lambda_invoke_arn`, `lambda_role_arn`, `lambda_role_name`, `log_group_name`.
+`lambda_invoke_arn`, `lambda_role_arn`, `lambda_role_name`, `log_group_name`,
+`config_secret_arn`, `config_secret_read_statement`.
+
+**The config secret** (v0.14.0, shared-terraform#5). `config_secret` wires the
+service's one Secrets Manager secret per plane (protocols
+`docs/adr-secret-storage.md`), which shared-rust's `platform-secrets` reads at
+cold start. The module grants the role `secretsmanager:GetSecretValue` on it
+and sets `env_var` to its ARN. It never declares a secret version, so no value
+reaches state: write values with platform-secrets'
+`scripts/put-config-key.sh`.
+
+```hcl
+module "service" {
+  # ...
+  service       = "drive" # required with plane: it names the secret
+  config_secret = { env_var = "DRIVE_CONFIG_SECRET", plane = "live" } # creates drive/live-config
+}
+
+# A secret that already exists (granite, compute-gateway, social-graph), or a
+# second function sharing the first's: give its ARN instead of a plane.
+module "trash_sweep" {
+  # ...
+  config_secret = { env_var = "DRIVE_CONFIG_SECRET", arn = module.service.config_secret_arn }
+}
+```
+
+With `arn` the module creates no secret, so adopting an existing one needs no
+`import`. Each function names its own env var, so a function that must not see
+the service's keys can take a secret of its own by ARN instead. With
+`role_arn` the module grants nothing: add `config_secret_read_statement` to
+that role's `extra_policy_statements` where it is managed. The CI role's
+describe/tag grant on the secret is the CI role's own config, not this module's.
 
 **A role managed elsewhere.** By default the module creates the execution role
 `<app_name>-lambda-role` and its policy, so the root applying it needs IAM
@@ -87,7 +118,7 @@ for `/aws/lambda/<app_name>` plus `extra_policy_statements`. Used by
 `rust-lambda-service` when no `role_arn` is given, and by an IAM root directly.
 Inputs `app_name`, `aws_region`, `extra_policy_statements`, `tags`.
 
-Outputs: `role_arn`, `role_name`.
+Outputs: `role_arn`, `role_name`, `policy_json`.
 
 ### `github-oidc-deploy-role`
 

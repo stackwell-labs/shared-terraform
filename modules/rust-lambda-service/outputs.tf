@@ -32,3 +32,13 @@ output "log_group_name" {
   description = "CloudWatch log group name."
   value       = aws_cloudwatch_log_group.lambda.name
 }
+
+output "config_secret_arn" {
+  description = "The config secret's ARN (created or given), or null without config_secret. Pass it to another function's config_secret.arn to share the secret."
+  value       = local.config_secret_arn
+}
+
+output "config_secret_read_statement" {
+  description = "The IAM statement granting secretsmanager:GetSecretValue on the config secret, or null without config_secret. The module adds it to the role it creates; with role_arn, put it on that role where it is managed."
+  value       = var.config_secret == null ? null : local.config_secret_read_statements[0]
+}

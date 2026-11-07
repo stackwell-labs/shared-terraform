@@ -9,7 +9,9 @@
 # Service-specific resources (DynamoDB tables, S3 buckets, KMS keys, SNS
 # topics, API Gateway, CloudFront) stay in each service's own config and are
 # wired in through `env` and `extra_policy_statements` (or, with `role_arn`,
-# through the policy of a role managed elsewhere).
+# through the policy of a role managed elsewhere). The one exception is the
+# service's adr-secret-storage config secret (`config_secret`), which every
+# service needs in the same shape (shared-terraform#5).
 
 locals {
   lambda_name    = var.app_name
@@ -22,6 +24,48 @@ locals {
   }, var.tags)
 }
 
+# The config secret (protocols docs/adr-secret-storage.md): created here when
+# config_secret names a plane, else the given ARN. Terraform owns the secret,
+# never its value: this module declares no aws_secretsmanager_secret_version
+# (config_secret.tftest.hcl checks), so no value lands in state.
+resource "aws_secretsmanager_secret" "config" {
+  # Keyed on plane, which a caller writes as a literal, not on arn, which may
+  # be another function's output and so unknown at plan time.
+  count = try(var.config_secret.plane, null) != null ? 1 : 0
+
+  name        = "${coalesce(var.service, "-")}/${var.config_secret.plane}-config"
+  description = "${coalesce(var.service, "-")} ${var.config_secret.plane} config (adr-secret-storage). Values are written out of band, never by Terraform."
+
+  tags = local.common_tags
+
+  lifecycle {
+    precondition {
+      # app_name names a function, not the service ("drive-service-trash-sweep"
+      # vs "drive"), and a secret's name is costly to change.
+      condition     = var.service != null
+      error_message = "config_secret.plane derives the secret name <service>/<plane>-config, so service must be set."
+    }
+  }
+}
+
+locals {
+  config_secret_arn = (
+    var.config_secret == null ? null :
+    var.config_secret.plane != null ? aws_secretsmanager_secret.config[0].arn :
+    var.config_secret.arn
+  )
+
+  config_secret_read_statements = var.config_secret == null ? [] : [{
+    Action   = ["secretsmanager:GetSecretValue"]
+    Effect   = "Allow"
+    Resource = local.config_secret_arn
+  }]
+
+  config_secret_env = var.config_secret == null ? {} : {
+    (var.config_secret.env_var) = local.config_secret_arn
+  }
+}
+
 # The execution role, unless the caller passes one it manages elsewhere
 # (role_arn). A root that must not hold IAM write calls lambda-execution-role
 # itself and passes the ARN here (shared-terraform#1).
@@ -31,7 +75,7 @@ module "execution_role" {
 
   app_name                = var.app_name
   aws_region              = var.aws_region
-  extra_policy_statements = var.extra_policy_statements
+  extra_policy_statements = concat(var.extra_policy_statements, local.config_secret_read_statements)
   tags                    = local.common_tags
 }
 
@@ -73,7 +117,7 @@ resource "aws_lambda_function" "this" {
   reserved_concurrent_executions = var.lambda_reserved_concurrency
 
   environment {
-    variables = var.env
+    variables = merge(var.env, local.config_secret_env)
   }
 
   depends_on = [aws_cloudwatch_log_group.lambda]
@@ -86,6 +130,11 @@ resource "aws_lambda_function" "this" {
       # dropped without a word. They belong where the role is managed.
       condition     = var.role_arn == null || length(var.extra_policy_statements) == 0
       error_message = "extra_policy_statements has no effect when role_arn is set: put them on the role where it is managed (e.g. its lambda-execution-role call)."
+    }
+
+    precondition {
+      condition     = var.config_secret == null ? true : !contains(keys(var.env), var.config_secret.env_var)
+      error_message = "env already sets config_secret.env_var; the module sets it to the config secret's ARN, so drop it from env."
     }
   }
 }

@@ -9,13 +9,17 @@
 # relationship, so each service keeps its own narrow blast radius.
 #
 # ONE exception, and it is the module's job, not the caller's: the module owns and
-# rewrites the trust policy, so it self-grants iam:UpdateAssumeRolePolicy on this
-# role's own ARN (see aws_iam_role_policy.trust_self_manage below). Callers must NOT
+# rewrites the trust policy, so by default it self-grants iam:UpdateAssumeRolePolicy on
+# this role's own ARN (see aws_iam_role_policy.trust_self_manage below). Callers must NOT
 # add that action to policy_json. NOTE on first adoption: if an EXISTING role's live
 # trust policy still needs to change when you upgrade to this version (e.g. it predates
 # the immutable-ID sub form) AND its old policy_json lacked the action, that first apply
 # can still 403 — grant iam:UpdateAssumeRolePolicy on the role out-of-band once, then
 # apply; every subsequent trust change self-heals.
+#
+# Turn the self-grant off (trust_self_manage = false) when the role is applied by
+# someone other than itself, e.g. a root an admin applies. There the grant buys
+# nothing and lets CI change who may assume the deploy role (shared-terraform#3).
 
 resource "aws_iam_openid_connect_provider" "github_actions" {
   count = var.create_oidc_provider ? 1 : 0
@@ -91,7 +95,12 @@ resource "aws_iam_role_policy" "scoped" {
 # it grants itself the one action needed to maintain it — scoped to this role's own
 # ARN only, so no blast-radius expansion (the role can rewrite only its own trust).
 # Callers no longer need iam:UpdateAssumeRolePolicy in policy_json.
+#
+# Only when the role applies its own root: with trust_self_manage = false (an admin
+# applies the role) the grant is not made, so CI cannot rewrite its own trust.
 resource "aws_iam_role_policy" "trust_self_manage" {
+  count = var.trust_self_manage ? 1 : 0
+
   name = "${var.role_name}-trust-self-manage"
   role = aws_iam_role.deploy.id
   policy = jsonencode({
@@ -102,4 +111,11 @@ resource "aws_iam_role_policy" "trust_self_manage" {
       Resource = aws_iam_role.deploy.arn
     }]
   })
+}
+
+# The self-grant gained a count (shared-terraform#3); callers on the default keep
+# their existing policy instead of planning a destroy and create.
+moved {
+  from = aws_iam_role_policy.trust_self_manage
+  to   = aws_iam_role_policy.trust_self_manage[0]
 }

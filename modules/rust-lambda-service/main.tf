@@ -8,7 +8,8 @@
 #
 # Service-specific resources (DynamoDB tables, S3 buckets, KMS keys, SNS
 # topics, API Gateway, CloudFront) stay in each service's own config and are
-# wired in through `env` and `extra_policy_statements`.
+# wired in through `env` and `extra_policy_statements` (or, with `role_arn`,
+# through the policy of a role managed elsewhere).
 
 locals {
   lambda_name    = var.app_name
@@ -19,56 +20,37 @@ locals {
     Service = coalesce(var.service, var.app_name)
     Managed = "terraform"
   }, var.tags)
-
-  # Base CloudWatch Logs statements every service needs, plus whatever the
-  # caller passes for its own resources.
-  base_log_statements = [
-    {
-      Action = [
-        "logs:CreateLogGroup",
-        "logs:CreateLogStream",
-        "logs:PutLogEvents"
-      ]
-      Effect   = "Allow"
-      Resource = "arn:aws:logs:${var.aws_region}:*:log-group:${local.log_group_name}:*"
-    },
-    {
-      Action   = ["logs:CreateLogGroup"]
-      Effect   = "Allow"
-      Resource = "arn:aws:logs:${var.aws_region}:*:log-group:*"
-    }
-  ]
-
-  policy_statements = concat(local.base_log_statements, var.extra_policy_statements)
 }
 
-resource "aws_iam_role" "lambda" {
-  name = "${var.app_name}-lambda-role"
+# The execution role, unless the caller passes one it manages elsewhere
+# (role_arn). A root that must not hold IAM write calls lambda-execution-role
+# itself and passes the ARN here (shared-terraform#1).
+module "execution_role" {
+  source = "../lambda-execution-role"
+  count  = var.role_arn == null ? 1 : 0
 
-  assume_role_policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [
-      {
-        Action = "sts:AssumeRole"
-        Effect = "Allow"
-        Principal = {
-          Service = "lambda.amazonaws.com"
-        }
-      }
-    ]
-  })
-
-  tags = local.common_tags
+  app_name                = var.app_name
+  aws_region              = var.aws_region
+  extra_policy_statements = var.extra_policy_statements
+  tags                    = local.common_tags
 }
 
-resource "aws_iam_role_policy" "lambda" {
-  name = "${var.app_name}-lambda-policy"
-  role = aws_iam_role.lambda.id
+# Before shared-terraform#1 the role and its policy were resources of this
+# module. These keep a caller that passes no role_arn at no change.
+moved {
+  from = aws_iam_role.lambda
+  to   = module.execution_role[0].aws_iam_role.lambda
+}
 
-  policy = jsonencode({
-    Version   = "2012-10-17"
-    Statement = local.policy_statements
-  })
+moved {
+  from = aws_iam_role_policy.lambda
+  to   = module.execution_role[0].aws_iam_role_policy.lambda
+}
+
+locals {
+  role_arn = var.role_arn != null ? var.role_arn : module.execution_role[0].role_arn
+  # The last path segment of the ARN: arn:aws:iam::<acct>:role[/path]/<name>.
+  role_name = var.role_arn != null ? regex("[^/]+$", var.role_arn) : module.execution_role[0].role_name
 }
 
 resource "aws_cloudwatch_log_group" "lambda" {
@@ -80,7 +62,7 @@ resource "aws_cloudwatch_log_group" "lambda" {
 
 resource "aws_lambda_function" "this" {
   function_name                  = local.lambda_name
-  role                           = aws_iam_role.lambda.arn
+  role                           = local.role_arn
   runtime                        = "provided.al2023"
   handler                        = "bootstrap"
   architectures                  = ["x86_64"]
@@ -97,6 +79,15 @@ resource "aws_lambda_function" "this" {
   depends_on = [aws_cloudwatch_log_group.lambda]
 
   tags = local.common_tags
+
+  lifecycle {
+    precondition {
+      # With role_arn the module writes no policy, so the statements would be
+      # dropped without a word. They belong where the role is managed.
+      condition     = var.role_arn == null || length(var.extra_policy_statements) == 0
+      error_message = "extra_policy_statements has no effect when role_arn is set: put them on the role where it is managed (e.g. its lambda-execution-role call)."
+    }
+  }
 }
 
 resource "aws_lambda_function_url" "this" {

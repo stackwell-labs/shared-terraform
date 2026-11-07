@@ -19,13 +19,13 @@ output "lambda_invoke_arn" {
 }
 
 output "lambda_role_arn" {
-  description = "Execution role ARN."
-  value       = aws_iam_role.lambda.arn
+  description = "Execution role ARN: role_arn when given, else the role this module created."
+  value       = local.role_arn
 }
 
 output "lambda_role_name" {
-  description = "Execution role name."
-  value       = aws_iam_role.lambda.name
+  description = "Execution role name: derived from role_arn when given, else the role this module created."
+  value       = local.role_name
 }
 
 output "log_group_name" {

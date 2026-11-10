@@ -22,6 +22,12 @@ name: terraform-deploy (reusable)
 #         tf_vars: |
 #           TF_VAR_some_flag=on
 #         smoke_health_url: https://<svc-domain>/health
+#
+# The deploy role can trust only jobs that run this workflow: set the
+# github-oidc-deploy-role module's job_workflow_refs to
+# "stackwell-labs/shared-terraform/.github/workflows/terraform-deploy.yml@refs/heads/main"
+# (the ref matching the `uses: ...@` above). Then the caller's other jobs on
+# the branch, such as its tests, can't assume it (shared-terraform#7).
 
 on:
   workflow_call:

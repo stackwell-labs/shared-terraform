@@ -69,6 +69,21 @@ data "aws_iam_policy_document" "trust" {
       variable = "token.actions.githubusercontent.com:sub"
       values   = local.sub_patterns
     }
+    # Optional pin to the workflow the job runs (shared-terraform#7). `sub` admits
+    # every job on the branch, including ones that run third-party code (drive#124).
+    # STS maps GitHub's `job_workflow_ref` claim to this key: for a job that calls a
+    # reusable workflow it names that workflow and its ref, so pinning it to
+    # terraform-deploy.yml admits only the deploy job. Conditions are ANDed, so the
+    # branch pin in `sub` still holds. Absent when the list is empty, so a caller
+    # that doesn't set it gets the same trust document as before.
+    dynamic "condition" {
+      for_each = length(var.job_workflow_refs) > 0 ? [var.job_workflow_refs] : []
+      content {
+        test     = "StringLike"
+        variable = "token.actions.githubusercontent.com:job_workflow_ref"
+        values   = condition.value
+      }
+    }
   }
 }
 

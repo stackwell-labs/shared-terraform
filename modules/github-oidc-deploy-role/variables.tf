@@ -58,3 +58,16 @@ variable "trust_self_manage" {
   type        = bool
   default     = true
 }
+
+variable "job_workflow_refs" {
+  description = "If set, only jobs whose GitHub `job_workflow_ref` claim matches one of these (StringLike) can assume the role, on top of the repo/branch pin. For a job that calls a reusable workflow the claim is `<owner>/<repo>/<path>@<ref>`, e.g. \"stackwell-labs/shared-terraform/.github/workflows/terraform-deploy.yml@refs/heads/main\". Empty (the default) adds no condition."
+  type        = list(string)
+  default     = []
+
+  validation {
+    # A pattern without `@<ref>` can never match the claim; it would lock the
+    # deploy out at assume time instead of failing here.
+    condition     = alltrue([for r in var.job_workflow_refs : can(regex("^[^/]+/[^/]+/\\.github/workflows/[^/]+@.+$", r))])
+    error_message = "Each job_workflow_refs entry must be <owner>/<repo>/.github/workflows/<file>@<ref>, e.g. stackwell-labs/shared-terraform/.github/workflows/terraform-deploy.yml@refs/heads/main."
+  }
+}

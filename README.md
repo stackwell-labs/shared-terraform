@@ -152,6 +152,25 @@ applies the role (an admin-applied root), set `trust_self_manage = false`:
 there the grant would only let CI change who may assume the role. A `moved`
 block makes a bump from v0.5.0 on the default plan no change.
 
+The repo/branch pin admits every job on the branch, including test jobs that
+run third-party code. To admit only the deploy job, pin the workflow it runs
+(shared-terraform#7):
+
+```hcl
+  job_workflow_refs = [
+    "stackwell-labs/shared-terraform/.github/workflows/terraform-deploy.yml@refs/heads/main",
+  ]
+```
+
+STS checks GitHub's `job_workflow_ref` claim against these patterns
+(StringLike), on top of the branch pin. For a job that calls a reusable
+workflow, the claim names that workflow and the ref the caller gave after
+`uses: ...@`, so the pattern must match that ref: `@refs/heads/main` for
+`@main`, `@refs/tags/v0.16.0` for a tag. Left empty (the default), the trust
+is unchanged. The pin narrows *which job* gets the token, not what runs inside
+it: the deploy job's own build still runs its dependencies' build scripts,
+unless it uses `prebuilt_artifact_name`.
+
 Outputs: `role_arn`, `role_name`, `oidc_provider_arn`.
 
 ### `alarms-to-shriek`

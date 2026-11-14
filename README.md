@@ -48,6 +48,12 @@ Outputs: `lambda_function_url`, `lambda_function_name`, `lambda_function_arn`,
 `lambda_invoke_arn`, `lambda_role_arn`, `lambda_role_name`, `log_group_name`,
 `config_secret_arn`, `config_secret_read_statement`.
 
+**The deployed commit** (v0.17.0, shared-terraform#8). `description` sets the
+function's description. A service passes `"commit <sha>"` of the commit it
+deploys: each published version keeps the description it was published with,
+and the platform audit reads the commit a function runs from it
+(agent-platform--ops#153). Empty (the default) changes nothing.
+
 **No Function URL** (v0.15.0, pigeon#79). A service fronted by an API Gateway
 passes `function_url = false`: the module then creates no Function URL and no
 public-invoke permission (nor their CloudFormation stack), so the gateway, and

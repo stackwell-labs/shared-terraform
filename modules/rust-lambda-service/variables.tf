@@ -78,6 +78,12 @@ variable "config_secret" {
   }
 }
 
+variable "description" {
+  description = "The function's description. A service records the commit it deploys here as `commit <sha>`: a published version keeps the description it was published with, and the platform audit reads the commit a function runs from it (agent-platform--ops#153). Empty (the default) leaves it blank."
+  type        = string
+  default     = ""
+}
+
 variable "lambda_memory_size" {
   description = "Lambda memory size in MB."
   type        = number

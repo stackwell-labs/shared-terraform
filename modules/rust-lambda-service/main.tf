@@ -115,6 +115,7 @@ resource "aws_lambda_function" "this" {
   memory_size                    = var.lambda_memory_size
   timeout                        = var.lambda_timeout_seconds
   reserved_concurrent_executions = var.lambda_reserved_concurrency
+  description                    = var.description
 
   environment {
     variables = merge(var.env, local.config_secret_env)

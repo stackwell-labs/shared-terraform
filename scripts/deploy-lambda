@@ -9,6 +9,8 @@ them by construction:
   1. the credentials are for the target's account;
   2. the tree is clean and HEAD is on origin/main;
   3. each bin is built (cargo, x86_64 musl) and zipped reproducibly;
+     a target with no bins is Terraform-only and skips this and step 5
+     (shared-terraform#13);
   4. terraform plans (with the repo's plan_env hook's variables, if any), the
      plan deletes nothing (a replace only of an address listed in
      allow_replace), the repo's plan_check hook (if any) accepts it, and
@@ -69,7 +71,8 @@ TARGET_FIELDS = {
     "plan_env": str,
     "plan_check": str,
 }
-OPTIONAL_TARGET_FIELDS = {"var_file", "allow_replace", "plan_env", "plan_check"}
+OPTIONAL_TARGET_FIELDS = {"var_file", "allow_replace", "plan_env", "plan_check",
+                          "cargo_manifest", "bins"}
 BIN_FIELDS = {"zip_var": str, "function_output": str}
 # A zip entry's timestamp: the earliest a zip can hold, so the zip's bytes
 # depend only on the binary.
@@ -139,9 +142,16 @@ def validate_target(name, t):
     check_fields(where, t, TARGET_FIELDS, OPTIONAL_TARGET_FIELDS)
     if not ACCOUNT_RE.match(t["account"]):
         raise Refusal(f"{where}: account must be a 12-digit AWS account id")
-    if not t["bins"]:
-        raise Refusal(f"{where}: bins is empty")
-    for bin_name, b in t["bins"].items():
+    # A target has bins and a cargo_manifest to build them, or neither: then it
+    # is Terraform-only. One spelling for that, so an empty bins table (a typo
+    # away from a forgotten [x.bins.y]) is refused rather than taken as it.
+    if "bins" in t and not t["bins"]:
+        raise Refusal(f"{where}: bins is empty (omit bins and cargo_manifest "
+                      "for a Terraform-only target)")
+    if ("bins" in t) != ("cargo_manifest" in t):
+        raise Refusal(f"{where}: bins and cargo_manifest go together "
+                      "(both, or neither for a Terraform-only target)")
+    for bin_name, b in t.setdefault("bins", {}).items():
         if not isinstance(b, dict):
             raise Refusal(f"{where}: bins.{bin_name} must be a table")
         check_fields(f"{where} bins.{bin_name}", b, BIN_FIELDS, set())
@@ -350,7 +360,11 @@ def deploy(repo, target, t):
     say(f"deploying {sha} to {target} (account {t['account']})")
     repo_env = hook_env(env, target, t, infra, sha)
     tf_env = dict(env, **plan_env(repo, env_hook, repo_env)) if env_hook else env
-    zips = build(repo, target, t, env)
+    if t["bins"]:
+        zips = build(repo, target, t, env)
+    else:
+        say(f"{target} has no bins: Terraform only, nothing to build")
+        zips = {}
     with tempfile.TemporaryDirectory(prefix="deploy-lambda-") as work:
         plan_and_apply(repo, infra, t, zips, sha, tf_env, check, repo_env, work)
     check_deployed(infra, t, zips, sha, env)

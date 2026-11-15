@@ -43,6 +43,16 @@ zip_var = "tick_zip_path"
 function_output = "tick_function_name"
 """
 
+# A Terraform-only target (shared-terraform#13): a web hosting root, say.
+WEB_TARGET = """
+[web]
+account = "{account}"
+profile = "web"
+region = "us-east-1"
+infra = "web/infra/aws"
+smoke = "scripts/smoke.sh"
+"""
+
 SMOKE = """\
 #!/usr/bin/env bash
 env | grep -E '^(DEPLOY_|AWS_PROFILE=)' | sort > "$STUB_DIR/smoke-env"
@@ -249,6 +259,66 @@ class DeployLambdaTest(unittest.TestCase):
 SECRET = "s3cret-value-never-logged"
 
 
+class TerraformOnlyTest(unittest.TestCase):
+    """A target with no bins: everything but the build and the function checks."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="deploy-lambda-test-"))
+        self.f = Fixture(self.tmp, manifest=MANIFEST.format(engine=PIN)
+                         + WEB_TARGET.format(account=ACCOUNT))
+        self.f.write("web/infra/aws/backend.hcl", "")
+        self.f.sha = commit_all(self.f.repo)
+        self.f.scenario["functions"] = {}
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp)
+
+    def assertRefused(self, out, needle):
+        self.assertEqual(out.returncode, 1, out.stdout + out.stderr)
+        self.assertIn("refusing", out.stderr)
+        self.assertIn(needle, out.stderr)
+
+    def test_deploys_without_building(self):
+        self.f.scenario["changes"] = [change("aws_s3_bucket.site", "update")]
+        out = self.f.run("web")
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+        self.assertIn("web has no bins: Terraform only, nothing to build", out.stdout)
+        self.assertIn(f"{self.f.sha} is live on web", out.stdout)
+        self.assertEqual(self.f.calls("cargo"), [])
+        # The only aws call is the account check: no function to look at.
+        self.assertEqual([c["args"][:2] for c in self.f.calls("aws")],
+                         [["sts", "get-caller-identity"]])
+        self.assertEqual({c["profile"] for c in self.f.calls()}, {"web"})
+        tf = [next(a for a in c["args"] if not a.startswith("-"))
+              for c in self.f.calls("terraform")]
+        self.assertEqual(tf, ["init", "plan", "show", "apply"])
+        plan = next(c for c in self.f.calls("terraform") if "plan" in c["args"])
+        self.assertIn(f"-var=deploy_commit={self.f.sha}", plan["args"])
+        self.assertIn("-chdir=" + str(self.f.repo / "web/infra/aws"), plan["args"])
+        self.assertEqual([a for a in plan["args"] if a.startswith("-var")],
+                         [f"-var=deploy_commit={self.f.sha}"])
+        smoke_env = (self.f.stub / "smoke-env").read_text()
+        self.assertIn("DEPLOY_TARGET=web\n", smoke_env)
+        self.assertIn(f"DEPLOY_INFRA={self.f.repo / 'web/infra/aws'}\n", smoke_env)
+
+    def test_keeps_the_delete_guard(self):
+        self.f.scenario["changes"] = [change("aws_cloudfront_distribution.site", "delete")]
+        self.assertRefused(self.f.run("web"), "aws_cloudfront_distribution.site (delete)")
+        self.assertFalse(self.f.applied())
+
+    def test_keeps_the_account_and_tree_checks(self):
+        self.f.scenario["account"] = "999999999999"
+        self.assertRefused(self.f.run("web"), "is account 999999999999, not 111122223333")
+        self.assertEqual(self.f.calls("terraform"), [])
+        self.f.scenario["account"] = ACCOUNT
+        self.f.write("stray.txt", "x")
+        self.assertRefused(self.f.run("web"), "uncommitted or untracked")
+        self.assertEqual(self.f.calls("terraform"), [])
+
+    def test_smoke_failure_fails_the_deploy(self):
+        self.assertRefused(self.f.run("web", SMOKE_EXIT="3"), "scripts/smoke.sh")
+
+
 class HookTest(unittest.TestCase):
     """The optional plan_env and plan_check hooks (shared-terraform#12)."""
 
@@ -360,11 +430,11 @@ class HookTest(unittest.TestCase):
 class ManifestTest(unittest.TestCase):
     """A manifest the engine can't read strictly refuses before touching AWS."""
 
-    def refuse(self, manifest, needle):
+    def refuse(self, manifest, needle, target="live"):
         tmp = Path(tempfile.mkdtemp(prefix="deploy-lambda-test-"))
         try:
             f = Fixture(tmp, manifest=manifest)
-            out = f.run()
+            out = f.run(target)
             self.assertEqual(out.returncode, 1, out.stdout + out.stderr)
             self.assertIn(needle, out.stderr)
             self.assertEqual(f.calls(), [])
@@ -387,6 +457,20 @@ class ManifestTest(unittest.TestCase):
     def test_bad_bin(self):
         self.refuse(self.base().replace('function_output = "tick_function_name"\n', ""),
                     "bins.svc-tick: missing function_output")
+
+    def test_empty_bins(self):
+        self.refuse(self.base() + WEB_TARGET.format(account=ACCOUNT)
+                    + 'cargo_manifest = "Cargo.toml"\nbins = {}\n',
+                    "[web]: bins is empty (omit bins and cargo_manifest", "web")
+
+    def test_cargo_manifest_without_bins(self):
+        self.refuse(self.base() + WEB_TARGET.format(account=ACCOUNT)
+                    + 'cargo_manifest = "Cargo.toml"\n',
+                    "[web]: bins and cargo_manifest go together", "web")
+
+    def test_bins_without_cargo_manifest(self):
+        self.refuse(self.base().replace('cargo_manifest = "Cargo.toml"\n', ""),
+                    "[live]: bins and cargo_manifest go together")
 
     def test_bad_engine(self):
         self.refuse(self.base().replace(PIN, "main"), "engine must be a 40-hex")

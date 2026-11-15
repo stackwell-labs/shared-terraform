@@ -271,8 +271,10 @@ Outputs: `rule_arn`, `role_arn` (the role the target uses, given or created).
 
 `scripts/deploy-lambda` deploys a Rust Lambda service from the box
 (shared-terraform#11), in place of each repo's own `deploy-live.sh` and
-`build-lambda.sh`. The repo describes its targets in `.amber/deploy.toml`;
-the engine owns the safety steps, so every service gets them by construction:
+`build-lambda.sh`, and any other Terraform root of the service's (a web
+hosting root, say) with the same guard. The repo describes its targets in
+`.amber/deploy.toml`; the engine owns the safety steps, so every service gets
+them by construction:
 
 ```mermaid
 flowchart LR
@@ -282,6 +284,8 @@ flowchart LR
   D --> E[apply that plan]
   E --> F[each function runs<br>the built zip and<br>names this commit]
   F --> G[repo's smoke hook]
+  B -. no bins .-> D
+  E -. no bins .-> G
 ```
 
 Run it from anywhere inside the service repo (Python 3.11+, `aws`,
@@ -302,7 +306,7 @@ profile = "compute-tmp"               # AWS_PROFILE for every aws/terraform call
 region = "us-east-1"
 infra = "infra/aws"                   # the Terraform root; init reads backend.hcl
 var_file = "live.tfvars"              # optional, relative to infra
-cargo_manifest = "Cargo.toml"
+cargo_manifest = "Cargo.toml"         # with bins; neither for Terraform-only
 allow_replace = []                    # optional: addresses the plan may replace
 smoke = "scripts/smoke-deploy.sh"     # required, run after the checks
 plan_env = "scripts/plan-env.sh"      # optional: KEY=value lines for terraform
@@ -311,6 +315,13 @@ plan_check = "scripts/plan-check.sh"  # optional: plan JSON on stdin; non-zero r
 [live.bins.compute-gateway-service]   # a cargo bin, zipped as `bootstrap`
 zip_var = "lambda_zip_path"           # the root's variable for its zip path
 function_output = "lambda_function_name"  # the root's output naming its function
+
+[web]                                 # a Terraform-only target: no bins
+account = "950916120278"
+profile = "compute-tmp"
+region = "us-east-1"
+infra = "web/infra/aws"
+smoke = "web/infra/aws/deploy-web.sh" # may publish, then check (below)
 ```
 
 - **Pinned.** Whichever copy you invoke hands off to the copy at the
@@ -327,6 +338,12 @@ function_output = "lambda_function_name"  # the root's output naming its functio
   the binaries are, so `CARGO_TARGET_DIR` is honoured, and writes each zip
   under `<target dir>/deploy-lambda/<target>/<bin>/` with a fixed timestamp
   and mode 0755: the same binary gives the same zip.
+- **A Terraform-only target** (shared-terraform#13) has no `bins` and no
+  `cargo_manifest`: the engine builds nothing and checks no function, and
+  keeps every other step, `deploy_commit` included. A target with one of the
+  two but not the other, or an empty `bins`, is refused. The engine deploys
+  one root per target, so a service with two roots has two targets, deployed
+  in turn (`deploy-lambda live`, then `deploy-lambda web`).
 - **The plan guard** refuses any `delete`; a replace (delete and create) only
   of an address in `allow_replace`. A plain delete is refused even then.
 - **Hooks** are executable files, relative to the repo root, run from it with
@@ -335,7 +352,10 @@ function_output = "lambda_function_name"  # the root's output naming its functio
   `DEPLOY_REGION`. A missing or non-executable one refuses before anything
   touches AWS.
 - **The smoke hook** runs last. A non-zero exit fails the deploy.
-  Service-specific checks (an unauthenticated 401, a journey) live here.
+  Service-specific checks (an unauthenticated 401, a journey) live here. It
+  may also publish what the applied root serves (a site's files to its
+  bucket) and then check the live result: it runs only once the guarded
+  apply and the function checks passed.
 - **`plan_env`** (optional, shared-terraform#12) runs before the build and
   prints `KEY=value` lines, e.g. a provider's API key read from Secrets
   Manager. Only the terraform calls in init, plan, show and apply get them

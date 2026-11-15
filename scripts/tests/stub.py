@@ -2,7 +2,8 @@
 """A fake aws, terraform and cargo for test_deploy_lambda.py.
 
 Installed under each of those names; it acts by the name it was called as and
-by $STUB_DIR/scenario.json, and logs every call to $STUB_DIR/calls.log.
+by $STUB_DIR/scenario.json, and logs every call to $STUB_DIR/calls.log (with
+the variables the scenario's log_env names).
 """
 
 import base64
@@ -18,7 +19,9 @@ tool = Path(sys.argv[0]).name
 args = sys.argv[1:]
 with (state / "calls.log").open("a") as log:
     log.write(json.dumps({"tool": tool, "args": args,
-                          "profile": os.environ.get("AWS_PROFILE")}) + "\n")
+                          "profile": os.environ.get("AWS_PROFILE"),
+                          "env": {k: os.environ.get(k) for k in scenario.get("log_env", [])}})
+              + "\n")
 
 
 def deployed():

@@ -9,8 +9,10 @@ them by construction:
   1. the credentials are for the target's account;
   2. the tree is clean and HEAD is on origin/main;
   3. each bin is built (cargo, x86_64 musl) and zipped reproducibly;
-  4. terraform plans, the plan deletes nothing (a replace only of an address
-     listed in allow_replace), and exactly that plan is applied;
+  4. terraform plans (with the repo's plan_env hook's variables, if any), the
+     plan deletes nothing (a replace only of an address listed in
+     allow_replace), the repo's plan_check hook (if any) accepts it, and
+     exactly that plan is applied;
   5. each function runs the zip built here and names this commit;
   6. the repo's smoke hook passes.
 
@@ -50,6 +52,10 @@ SHARED_TERRAFORM = Path(os.environ.get("DEPLOY_LAMBDA_SHARED_TERRAFORM",
 RUST_TARGET = "x86_64-unknown-linux-musl"
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 ACCOUNT_RE = re.compile(r"^[0-9]{12}$")
+ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+# plan_env may not set these: they decide which account terraform acts in and
+# what it does, which the engine owns.
+ENGINE_ENV_PREFIXES = ("AWS_", "TF_")
 TARGET_FIELDS = {
     "account": str,
     "profile": str,
@@ -60,8 +66,10 @@ TARGET_FIELDS = {
     "bins": dict,
     "allow_replace": list,
     "smoke": str,
+    "plan_env": str,
+    "plan_check": str,
 }
-OPTIONAL_TARGET_FIELDS = {"var_file", "allow_replace"}
+OPTIONAL_TARGET_FIELDS = {"var_file", "allow_replace", "plan_env", "plan_check"}
 BIN_FIELDS = {"zip_var": str, "function_output": str}
 # A zip entry's timestamp: the earliest a zip can hold, so the zip's bytes
 # depend only on the binary.
@@ -166,6 +174,50 @@ def hand_off(repo, engine, argv):
         os.unlink(f.name)
 
 
+# --- the repo's hooks -----------------------------------------------------
+
+
+def hook_path(repo, t, field):
+    """The target's hook named by field, checked runnable; None if it has none."""
+    if field not in t:
+        return None
+    hook = repo / t[field]
+    if not hook.is_file() or not os.access(hook, os.X_OK):
+        raise Refusal(f"{field} hook {t[field]} is not an executable file")
+    return hook
+
+
+def hook_env(env, target, t, infra, sha):
+    return dict(env, DEPLOY_TARGET=target, DEPLOY_COMMIT=sha,
+                DEPLOY_INFRA=str(infra), DEPLOY_REGION=t["region"])
+
+
+def plan_env(repo, hook, env):
+    """The plan_env hook's KEY=value lines, as variables for terraform.
+
+    Values are often secrets (a provider's API key): only the names are ever
+    printed, never a value or a line that failed to parse.
+    """
+    out = run([str(hook)], cwd=repo, env=env, capture=True)
+    extra = {}
+    for n, line in enumerate(out.splitlines(), 1):
+        if not line.strip():
+            continue
+        name, eq, value = line.partition("=")
+        if not eq or not ENV_NAME_RE.match(name):
+            raise Refusal(f"plan_env line {n} is not KEY=value (the line is not shown)")
+        if name.startswith(ENGINE_ENV_PREFIXES):
+            raise Refusal(f"plan_env may not set {name}: the engine owns "
+                          + " and ".join(p + "*" for p in ENGINE_ENV_PREFIXES))
+        if name in extra:
+            raise Refusal(f"plan_env sets {name} twice")
+        if not value:
+            raise Refusal(f"plan_env sets {name} to an empty value")
+        extra[name] = value
+    say(f"plan_env sets {', '.join(sorted(extra)) or 'nothing'} for terraform")
+    return extra
+
+
 # --- the steps ------------------------------------------------------------
 
 
@@ -238,22 +290,29 @@ def refused_changes(plan, allow_replace):
     return refused
 
 
-def plan_and_apply(infra, t, zips, sha, env, work):
+def plan_and_apply(repo, infra, t, zips, sha, tf_env, check, check_env, work):
+    """tf_env is the deploy's env plus plan_env's variables: only terraform sees it."""
     tf = ["terraform", f"-chdir={infra}"]
-    run(tf + ["init", "-input=false", "-backend-config=backend.hcl"], env=env)
+    run(tf + ["init", "-input=false", "-backend-config=backend.hcl"], env=tf_env)
     plan_file = str(Path(work) / "tfplan")
     cmd = tf + ["plan", "-input=false", f"-out={plan_file}", f"-var=deploy_commit={sha}"]
     if "var_file" in t:
         cmd.append(f"-var-file={t['var_file']}")
     for bin_name, b in t["bins"].items():
         cmd.append(f"-var={b['zip_var']}={zips[bin_name]}")
-    run(cmd, env=env)
-    plan = json.loads(run(tf + ["show", "-json", plan_file], env=env, capture=True))
-    refused = refused_changes(plan, t["allow_replace"])
+    run(cmd, env=tf_env)
+    plan_json = run(tf + ["show", "-json", plan_file], env=tf_env, capture=True)
+    refused = refused_changes(json.loads(plan_json), t["allow_replace"])
     if refused:
         raise Refusal("the plan deletes or replaces resources; not applying:\n  "
                       + "\n  ".join(refused))
-    run(tf + ["apply", "-input=false", plan_file], env=env)
+    if check is not None:
+        code = subprocess.run([str(check)], cwd=repo, env=check_env, input=plan_json,
+                              text=True).returncode
+        if code != 0:
+            raise Refusal(f"plan_check {t['plan_check']} refused the plan (exit {code}); "
+                          "not applying")
+    run(tf + ["apply", "-input=false", plan_file], env=tf_env)
 
 
 def b64_sha256(path):
@@ -277,23 +336,23 @@ def check_deployed(infra, t, zips, sha, env):
 
 
 def smoke(repo, target, t, infra, sha, env):
-    hook = repo / t["smoke"]
-    if not hook.is_file():
-        raise Refusal(f"smoke hook {t['smoke']} does not exist")
-    hook_env = dict(env, DEPLOY_TARGET=target, DEPLOY_COMMIT=sha,
-                    DEPLOY_INFRA=str(infra), DEPLOY_REGION=t["region"])
-    run([str(hook)], cwd=repo, env=hook_env)
+    hook = hook_path(repo, t, "smoke")
+    run([str(hook)], cwd=repo, env=hook_env(env, target, t, infra, sha))
 
 
 def deploy(repo, target, t):
     env = dict(os.environ, AWS_PROFILE=t["profile"])
     infra = (repo / t["infra"]).resolve()
+    env_hook = hook_path(repo, t, "plan_env")
+    check = hook_path(repo, t, "plan_check")
     check_account(t, env)
     sha = check_tree(repo)
     say(f"deploying {sha} to {target} (account {t['account']})")
+    repo_env = hook_env(env, target, t, infra, sha)
+    tf_env = dict(env, **plan_env(repo, env_hook, repo_env)) if env_hook else env
     zips = build(repo, target, t, env)
     with tempfile.TemporaryDirectory(prefix="deploy-lambda-") as work:
-        plan_and_apply(infra, t, zips, sha, env, work)
+        plan_and_apply(repo, infra, t, zips, sha, tf_env, check, repo_env, work)
     check_deployed(infra, t, zips, sha, env)
     smoke(repo, target, t, infra, sha, env)
     say(f"{sha} is live on {target}")

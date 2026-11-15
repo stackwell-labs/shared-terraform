@@ -240,6 +240,117 @@ class DeployLambdaTest(unittest.TestCase):
         self.assertRefused(self.f.run("prod"), "no target 'prod' (it has: live)")
 
 
+SECRET = "s3cret-value-never-logged"
+
+
+class HookTest(unittest.TestCase):
+    """The optional plan_env and plan_check hooks (shared-terraform#12)."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="deploy-lambda-test-"))
+        self.f = Fixture(self.tmp)
+        self.f.scenario["log_env"] = ["PROVIDER_API_KEY", "DEPLOY_COMMIT"]
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp)
+
+    def hooks(self, plan_env=None, plan_check=None):
+        """Add the given hook scripts to the target and land them."""
+        manifest = MANIFEST.format(engine=PIN)
+        for field, body in (("plan_env", plan_env), ("plan_check", plan_check)):
+            if body is None:
+                continue
+            rel = f"scripts/{field}.sh"
+            self.f.write(rel, "#!/usr/bin/env bash\n" + body)
+            (self.f.repo / rel).chmod(0o755)
+            manifest = manifest.replace('smoke = ', f'{field} = "{rel}"\nsmoke = ')
+        self.f.write(".amber/deploy.toml", manifest)
+        self.f.sha = commit_all(self.f.repo)
+
+    def assertRefused(self, out, needle):
+        self.assertEqual(out.returncode, 1, out.stdout + out.stderr)
+        self.assertIn("refusing", out.stderr)
+        self.assertIn(needle, out.stderr)
+
+    # --- plan_env -----------------------------------------------------------
+
+    def test_plan_env_reaches_terraform_only_and_is_never_logged(self):
+        self.hooks(plan_env=f'echo "PROVIDER_API_KEY={SECRET}"\n'
+                            'echo\necho "OTHER=a=b"\n'
+                            'echo "commit $DEPLOY_COMMIT" >&2\n')
+        out = self.f.run()
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+        tf = self.f.calls("terraform")
+        for cmd in ("init", "plan", "show", "apply"):
+            call = next(c for c in tf if cmd in c["args"])
+            self.assertEqual(call["env"]["PROVIDER_API_KEY"], SECRET, cmd)
+        # Nothing else gets it: not aws, not cargo, not the smoke hook.
+        others = [c for c in self.f.calls() if c["tool"] != "terraform"]
+        self.assertTrue(others)
+        self.assertTrue(all(c["env"]["PROVIDER_API_KEY"] is None for c in others))
+        self.assertNotIn(SECRET, (self.f.stub / "smoke-env").read_text())
+        self.assertNotIn(SECRET, out.stdout + out.stderr)
+        self.assertIn("plan_env sets OTHER, PROVIDER_API_KEY for terraform", out.stdout)
+        # The hook runs with the same DEPLOY_* variables as the smoke hook.
+        self.assertIn(f"commit {self.f.sha}", out.stderr)
+
+    def test_plan_env_runs_before_the_build(self):
+        self.hooks(plan_env="exit 4\n")
+        self.assertRefused(self.f.run(), "plan_env.sh` exited 4")
+        self.assertEqual(self.f.calls("cargo") + self.f.calls("terraform"), [])
+
+    def test_plan_env_bad_line_is_refused_unshown(self):
+        self.hooks(plan_env=f'echo "PROVIDER_API_KEY={SECRET}"\necho "oops {SECRET}"\n')
+        out = self.f.run()
+        self.assertRefused(out, "plan_env line 2 is not KEY=value (the line is not shown)")
+        self.assertNotIn(SECRET, out.stdout + out.stderr)
+        self.assertEqual(self.f.calls("terraform"), [])
+
+    def test_plan_env_may_not_set_engine_variables(self):
+        for name in ("AWS_PROFILE", "TF_CLI_ARGS_apply"):
+            self.hooks(plan_env=f'echo "{name}=x"\n')
+            self.assertRefused(self.f.run(), f"plan_env may not set {name}")
+            self.assertEqual(self.f.calls("terraform"), [])
+
+    def test_plan_env_refuses_empty_and_duplicate(self):
+        self.hooks(plan_env='echo "PROVIDER_API_KEY="\n')
+        self.assertRefused(self.f.run(), "plan_env sets PROVIDER_API_KEY to an empty value")
+        self.hooks(plan_env='echo "A=1"\necho "A=2"\n')
+        self.assertRefused(self.f.run(), "plan_env sets A twice")
+
+    # --- plan_check ---------------------------------------------------------
+
+    def test_plan_check_reads_the_plan_and_accepts(self):
+        self.f.scenario["changes"] = [change("aws_lambda_function.svc", "update")]
+        self.hooks(plan_check='cat > "$STUB_DIR/checked.json"\n')
+        out = self.f.run()
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+        self.assertTrue(self.f.applied())
+        checked = json.loads((self.f.stub / "checked.json").read_text())
+        self.assertEqual(checked["resource_changes"], self.f.scenario["changes"])
+
+    def test_plan_check_refusal_stops_the_apply(self):
+        self.hooks(plan_check='cat >/dev/null\necho "a channel would be dropped" >&2\nexit 2\n')
+        out = self.f.run()
+        self.assertRefused(out, "plan_check scripts/plan_check.sh refused the plan (exit 2)")
+        self.assertIn("a channel would be dropped", out.stderr)
+        self.assertFalse(self.f.applied())
+
+    def test_engine_guard_runs_before_plan_check(self):
+        self.f.scenario["changes"] = [change("aws_dynamodb_table.data", "delete")]
+        self.hooks(plan_check='touch "$STUB_DIR/checked"\n')
+        self.assertRefused(self.f.run(), "aws_dynamodb_table.data (delete)")
+        self.assertFalse((self.f.stub / "checked").exists())
+        self.assertFalse(self.f.applied())
+
+    def test_missing_or_unexecutable_hook_refuses_before_aws(self):
+        self.hooks(plan_check="exit 0\n")
+        (self.f.repo / "scripts/plan_check.sh").chmod(0o644)
+        self.assertRefused(self.f.run(), "plan_check hook scripts/plan_check.sh is not an "
+                                         "executable file")
+        self.assertEqual(self.f.calls(), [])
+
+
 class ManifestTest(unittest.TestCase):
     """A manifest the engine can't read strictly refuses before touching AWS."""
 

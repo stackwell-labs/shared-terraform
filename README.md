@@ -278,7 +278,7 @@ the engine owns the safety steps, so every service gets them by construction:
 flowchart LR
   A[account is<br>the target's] --> B[clean tree,<br>HEAD on origin/main]
   B --> C[cargo build,<br>reproducible zips]
-  C --> D[plan: no delete,<br>replace only if allowed]
+  C --> D[plan: no delete,<br>replace only if allowed;<br>repo's plan_check]
   D --> E[apply that plan]
   E --> F[each function runs<br>the built zip and<br>names this commit]
   F --> G[repo's smoke hook]
@@ -305,6 +305,8 @@ var_file = "live.tfvars"              # optional, relative to infra
 cargo_manifest = "Cargo.toml"
 allow_replace = []                    # optional: addresses the plan may replace
 smoke = "scripts/smoke-deploy.sh"     # required, run after the checks
+plan_env = "scripts/plan-env.sh"      # optional: KEY=value lines for terraform
+plan_check = "scripts/plan-check.sh"  # optional: plan JSON on stdin; non-zero refuses
 
 [live.bins.compute-gateway-service]   # a cargo bin, zipped as `bootstrap`
 zip_var = "lambda_zip_path"           # the root's variable for its zip path
@@ -327,11 +329,24 @@ function_output = "lambda_function_name"  # the root's output naming its functio
   and mode 0755: the same binary gives the same zip.
 - **The plan guard** refuses any `delete`; a replace (delete and create) only
   of an address in `allow_replace`. A plain delete is refused even then.
-- **The smoke hook** runs from the repo root with `AWS_PROFILE`,
-  `DEPLOY_TARGET`, `DEPLOY_COMMIT`, `DEPLOY_INFRA` (the root's absolute path,
-  for `terraform -chdir="$DEPLOY_INFRA" output`) and `DEPLOY_REGION`. A
-  non-zero exit fails the deploy. Service-specific checks (an unauthenticated
-  401, a journey) live here.
+- **Hooks** are executable files, relative to the repo root, run from it with
+  `AWS_PROFILE`, `DEPLOY_TARGET`, `DEPLOY_COMMIT`, `DEPLOY_INFRA` (the root's
+  absolute path, for `terraform -chdir="$DEPLOY_INFRA" output`) and
+  `DEPLOY_REGION`. A missing or non-executable one refuses before anything
+  touches AWS.
+- **The smoke hook** runs last. A non-zero exit fails the deploy.
+  Service-specific checks (an unauthenticated 401, a journey) live here.
+- **`plan_env`** (optional, shared-terraform#12) runs before the build and
+  prints `KEY=value` lines, e.g. a provider's API key read from Secrets
+  Manager. Only the terraform calls in init, plan, show and apply get them
+  (not aws, cargo or the other hooks), and the engine prints their names,
+  never a value. It refuses a line that isn't `KEY=value` (without showing
+  it), an empty value, a key set twice, and any `AWS_*` or `TF_*` key: those
+  decide the account and what terraform does, which the engine owns.
+- **`plan_check`** (optional, shared-terraform#12) gets `terraform show -json`
+  of the plan on stdin, after the engine's own guard passed. A non-zero exit
+  refuses the apply; say why on stderr. A service-specific rule about the
+  plan (shriek's: never unassign a healthchecks.io channel) lives here.
 
 Tests: `python3 -m unittest discover -s scripts/tests -v` runs the engine
 against a stubbed `aws`, `terraform` and `cargo`, one test per refusal

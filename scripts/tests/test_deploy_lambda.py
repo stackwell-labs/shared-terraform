@@ -233,6 +233,12 @@ class DeployLambdaTest(unittest.TestCase):
         self.assertRefused(self.f.run(), "cargo built no")
         self.assertEqual(self.f.calls("terraform"), [])
 
+    def test_missing_smoke_hook_refuses_before_aws(self):
+        (self.f.repo / "scripts/smoke.sh").unlink()
+        commit_all(self.f.repo)
+        self.assertRefused(self.f.run(), "smoke hook scripts/smoke.sh is not an executable file")
+        self.assertEqual(self.f.calls(), [])
+
     def test_smoke_failure_fails_the_deploy(self):
         self.assertRefused(self.f.run(SMOKE_EXIT="3"), "scripts/smoke.sh")
 

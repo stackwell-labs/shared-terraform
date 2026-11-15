@@ -335,8 +335,7 @@ def check_deployed(infra, t, zips, sha, env):
         say(f"{fn} runs {built} (commit {sha})")
 
 
-def smoke(repo, target, t, infra, sha, env):
-    hook = hook_path(repo, t, "smoke")
+def smoke(repo, hook, target, t, infra, sha, env):
     run([str(hook)], cwd=repo, env=hook_env(env, target, t, infra, sha))
 
 
@@ -345,6 +344,7 @@ def deploy(repo, target, t):
     infra = (repo / t["infra"]).resolve()
     env_hook = hook_path(repo, t, "plan_env")
     check = hook_path(repo, t, "plan_check")
+    smoke_hook = hook_path(repo, t, "smoke")
     check_account(t, env)
     sha = check_tree(repo)
     say(f"deploying {sha} to {target} (account {t['account']})")
@@ -354,7 +354,7 @@ def deploy(repo, target, t):
     with tempfile.TemporaryDirectory(prefix="deploy-lambda-") as work:
         plan_and_apply(repo, infra, t, zips, sha, tf_env, check, repo_env, work)
     check_deployed(infra, t, zips, sha, env)
-    smoke(repo, target, t, infra, sha, env)
+    smoke(repo, smoke_hook, target, t, infra, sha, env)
     say(f"{sha} is live on {target}")
 
 

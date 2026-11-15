@@ -296,11 +296,13 @@ class PinTest(unittest.TestCase):
         root.mkdir()
         f = Fixture(root, engine=engine)
         f.env.pop("DEPLOY_LAMBDA_PINNED")
+        f.env["DEPLOY_LAMBDA_SHARED_TERRAFORM"] = str(self.st)
         return f
 
     def test_hands_off_to_pinned_commit(self):
-        # The invoked copy can't deploy; only the pinned commit's copy can.
-        launcher = self.st / "scripts/deploy-lambda"
+        # The invoked copy, outside any repo as in the README's
+        # `<(git show ...)`, can't deploy; only the pinned commit's copy can.
+        launcher = self.tmp / "launcher.py"
         source = ENGINE.read_text()
         head = "def deploy(repo, target, t):\n"
         self.assertIn(head, source)
@@ -315,7 +317,7 @@ class PinTest(unittest.TestCase):
         git(self.st, "commit", "-q", "--allow-empty", "-m", "unlanded")
         unlanded = git(self.st, "rev-parse", "HEAD")
         f = self.fixture(unlanded)
-        out = f.run(engine=self.st / "scripts/deploy-lambda")
+        out = f.run(engine=ENGINE)
         self.assertEqual(out.returncode, 1, out.stdout + out.stderr)
         self.assertIn(f"engine {unlanded} is not a shared-terraform commit on origin/main",
                       out.stderr)

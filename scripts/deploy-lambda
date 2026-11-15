@@ -16,12 +16,15 @@ them by construction:
 
 Run it from anywhere inside the service repo:
 
-  ~/agent-platform/shared-terraform/scripts/deploy-lambda <target>
+  python3 -I <(git -C ~/agent-platform/shared-terraform show \
+    origin/main:scripts/deploy-lambda) <target>
 
 The manifest pins the engine: `engine` is a shared-terraform commit on
 origin/main. Whatever copy is invoked hands off to the pinned commit's copy,
-so a repo deploys with the engine it was tested with until it moves the pin.
-README.md ("deploy-lambda") documents the manifest.
+read from the shared-terraform clone's git objects (never its working tree,
+which nothing keeps current), so a repo deploys with the engine it was tested
+with until it moves the pin. README.md ("deploy-lambda") documents the
+manifest.
 
 Python stdlib only (3.11+, for tomllib), so the pinned copy runs straight out
 of `git show` with no build step.
@@ -41,6 +44,9 @@ from pathlib import Path
 
 MANIFEST = ".amber/deploy.toml"
 PINNED_ENV = "DEPLOY_LAMBDA_PINNED"
+# The box's shared-terraform clone; devbox-fetch keeps its origin current.
+SHARED_TERRAFORM = Path(os.environ.get("DEPLOY_LAMBDA_SHARED_TERRAFORM",
+                                       Path.home() / "agent-platform" / "shared-terraform"))
 RUST_TARGET = "x86_64-unknown-linux-musl"
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 ACCOUNT_RE = re.compile(r"^[0-9]{12}$")
@@ -142,8 +148,7 @@ def validate_target(name, t):
 
 def hand_off(repo, engine, argv):
     """Run the pinned engine commit's copy of this script."""
-    here = Path(__file__).resolve().parent.parent
-    git = ["git", "-C", str(here)]
+    git = ["git", "-C", str(SHARED_TERRAFORM)]
     if subprocess.run(git + ["cat-file", "-e", f"{engine}^{{commit}}"],
                       stderr=subprocess.DEVNULL).returncode != 0:
         run(git + ["fetch", "--quiet", "origin", "main"])

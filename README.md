@@ -288,7 +288,8 @@ Run it from anywhere inside the service repo (Python 3.11+, `aws`,
 `terraform`, `cargo` with the musl target):
 
 ```sh
-~/agent-platform/shared-terraform/scripts/deploy-lambda live
+python3 -I <(git -C ~/agent-platform/shared-terraform show \
+  origin/main:scripts/deploy-lambda) live
 ```
 
 ```toml
@@ -312,7 +313,10 @@ function_output = "lambda_function_name"  # the root's output naming its functio
 
 - **Pinned.** Whichever copy you invoke hands off to the copy at the
   manifest's `engine` commit (it must be on shared-terraform's origin/main), so
-  a repo keeps the engine it was tested with until it moves the pin.
+  a repo keeps the engine it was tested with until it moves the pin. It reads
+  that copy from `~/agent-platform/shared-terraform`'s git objects, never its
+  working tree, which nothing keeps current (`DEPLOY_LAMBDA_SHARED_TERRAFORM`
+  points elsewhere, for the tests).
 - **The root** must declare `deploy_commit` (the engine passes `-var=deploy_commit=<sha>`)
   and set each function's description to `commit <sha>` (rust-lambda-service's
   `description`), and must declare each bin's `zip_var` and `function_output`.

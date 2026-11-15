@@ -8,6 +8,10 @@
 #              test` where it has *.tftest.hcl (mocked provider)
 #              (.amber/validate-modules.sh)
 #   fmt      = `terraform fmt -check -recursive`
+#   deploy-lambda = scripts/deploy-lambda's tests, against a stubbed aws,
+#              terraform and cargo (scripts/tests; shared-terraform#11). The
+#              rust image is only for its git and python3 (3.11, for tomllib),
+#              the same image drive pins.
 #
 # fmt is advisory (a failure reports neutral) because main fails it today:
 # modules/fargate-service/versions.tf has one misaligned `=`
@@ -43,5 +47,12 @@ TF_PLUGIN_CACHE_DIR = "/cache/plugins"
 image = "docker.io/hashicorp/terraform:1.10.5@sha256:679ac5e095bf550bc726742cd12efa6050f0913080df479fdabfeb202953af28"
 run = ["terraform fmt -check -recursive -diff"]
 required_for_main = false
+reuse = true
+timeout_minutes = 5
+
+[job.deploy-lambda]
+image = "docker.io/library/rust:1.97.0-bookworm@sha256:8fa55b2f3ddf97471ab6a767bfa3f37e6bad0986ba823e75fea57e2a2a5c3073"
+run = ["python3 -m unittest discover -s scripts/tests -v"]
+required_for_main = true
 reuse = true
 timeout_minutes = 5

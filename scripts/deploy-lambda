@@ -1,0 +1,315 @@
+#!/usr/bin/env python3
+"""deploy-lambda: deploy a Rust Lambda service from the box (shared-terraform#11).
+
+One engine for every box-deployed Lambda service, in place of each repo's own
+deploy-live.sh and build-lambda.sh. A repo describes its deploy targets in
+.amber/deploy.toml; the engine owns the safety steps, so every service gets
+them by construction:
+
+  1. the credentials are for the target's account;
+  2. the tree is clean and HEAD is on origin/main;
+  3. each bin is built (cargo, x86_64 musl) and zipped reproducibly;
+  4. terraform plans, the plan deletes nothing (a replace only of an address
+     listed in allow_replace), and exactly that plan is applied;
+  5. each function runs the zip built here and names this commit;
+  6. the repo's smoke hook passes.
+
+Run it from anywhere inside the service repo:
+
+  ~/agent-platform/shared-terraform/scripts/deploy-lambda <target>
+
+The manifest pins the engine: `engine` is a shared-terraform commit on
+origin/main. Whatever copy is invoked hands off to the pinned commit's copy,
+so a repo deploys with the engine it was tested with until it moves the pin.
+README.md ("deploy-lambda") documents the manifest.
+
+Python stdlib only (3.11+, for tomllib), so the pinned copy runs straight out
+of `git show` with no build step.
+"""
+
+import base64
+import hashlib
+import json
+import os
+import re
+import subprocess
+import sys
+import tempfile
+import tomllib
+import zipfile
+from pathlib import Path
+
+MANIFEST = ".amber/deploy.toml"
+PINNED_ENV = "DEPLOY_LAMBDA_PINNED"
+RUST_TARGET = "x86_64-unknown-linux-musl"
+SHA_RE = re.compile(r"^[0-9a-f]{40}$")
+ACCOUNT_RE = re.compile(r"^[0-9]{12}$")
+TARGET_FIELDS = {
+    "account": str,
+    "profile": str,
+    "region": str,
+    "infra": str,
+    "var_file": str,
+    "cargo_manifest": str,
+    "bins": dict,
+    "allow_replace": list,
+    "smoke": str,
+}
+OPTIONAL_TARGET_FIELDS = {"var_file", "allow_replace"}
+BIN_FIELDS = {"zip_var": str, "function_output": str}
+# A zip entry's timestamp: the earliest a zip can hold, so the zip's bytes
+# depend only on the binary.
+ZIP_EPOCH = (1980, 1, 1, 0, 0, 0)
+
+
+class Refusal(Exception):
+    pass
+
+
+def say(msg):
+    print(f"deploy-lambda: {msg}", flush=True)
+
+
+def run(args, *, cwd=None, env=None, capture=False):
+    """Run a command; a non-zero exit refuses the deploy."""
+    out = subprocess.run(
+        args,
+        cwd=cwd,
+        env=env,
+        stdout=subprocess.PIPE if capture else None,
+        text=True,
+    )
+    if out.returncode != 0:
+        raise Refusal(f"`{' '.join(args)}` exited {out.returncode}")
+    return out.stdout if capture else None
+
+
+# --- the manifest ---------------------------------------------------------
+
+
+def load_manifest(repo, target):
+    path = repo / MANIFEST
+    if not path.is_file():
+        raise Refusal(f"no {MANIFEST} in {repo}")
+    with path.open("rb") as f:
+        doc = tomllib.load(f)
+    engine = doc.get("engine")
+    if not isinstance(engine, str) or not SHA_RE.match(engine):
+        raise Refusal(f"{MANIFEST}: engine must be a 40-hex shared-terraform commit")
+    targets = {k: v for k, v in doc.items() if k != "engine"}
+    for name, value in targets.items():
+        if not isinstance(value, dict):
+            raise Refusal(f"{MANIFEST}: unknown top-level key {name!r}")
+    if target not in targets:
+        raise Refusal(
+            f"{MANIFEST} has no target {target!r} (it has: {', '.join(sorted(targets)) or 'none'})"
+        )
+    return engine, validate_target(target, targets[target])
+
+
+def check_fields(where, table, fields, optional):
+    unknown = set(table) - set(fields)
+    if unknown:
+        raise Refusal(f"{where}: unknown field(s) {', '.join(sorted(unknown))}")
+    for field, kind in fields.items():
+        if field not in table:
+            if field in optional:
+                continue
+            raise Refusal(f"{where}: missing {field}")
+        if not isinstance(table[field], kind) or (kind is str and not table[field]):
+            raise Refusal(f"{where}: {field} must be a non-empty {kind.__name__}")
+
+
+def validate_target(name, t):
+    where = f"{MANIFEST} [{name}]"
+    check_fields(where, t, TARGET_FIELDS, OPTIONAL_TARGET_FIELDS)
+    if not ACCOUNT_RE.match(t["account"]):
+        raise Refusal(f"{where}: account must be a 12-digit AWS account id")
+    if not t["bins"]:
+        raise Refusal(f"{where}: bins is empty")
+    for bin_name, b in t["bins"].items():
+        if not isinstance(b, dict):
+            raise Refusal(f"{where}: bins.{bin_name} must be a table")
+        check_fields(f"{where} bins.{bin_name}", b, BIN_FIELDS, set())
+    allow = t.setdefault("allow_replace", [])
+    if not all(isinstance(a, str) and a for a in allow):
+        raise Refusal(f"{where}: allow_replace must list resource addresses")
+    return t
+
+
+# --- pinning --------------------------------------------------------------
+
+
+def hand_off(repo, engine, argv):
+    """Run the pinned engine commit's copy of this script."""
+    here = Path(__file__).resolve().parent.parent
+    git = ["git", "-C", str(here)]
+    if subprocess.run(git + ["cat-file", "-e", f"{engine}^{{commit}}"],
+                      stderr=subprocess.DEVNULL).returncode != 0:
+        run(git + ["fetch", "--quiet", "origin", "main"])
+    if subprocess.run(git + ["merge-base", "--is-ancestor", engine, "origin/main"]).returncode != 0:
+        raise Refusal(f"engine {engine} is not a shared-terraform commit on origin/main")
+    source = run(git + ["show", f"{engine}:scripts/deploy-lambda"], capture=True)
+    with tempfile.NamedTemporaryFile("w", prefix="deploy-lambda-", suffix=".py",
+                                     delete=False) as f:
+        f.write(source)
+    say(f"engine pinned at shared-terraform {engine}")
+    env = dict(os.environ, **{PINNED_ENV: engine})
+    try:
+        return subprocess.run([sys.executable, "-I", f.name, *argv], cwd=repo, env=env).returncode
+    finally:
+        os.unlink(f.name)
+
+
+# --- the steps ------------------------------------------------------------
+
+
+def check_account(t, env):
+    caller = run(["aws", "sts", "get-caller-identity", "--query", "Account",
+                  "--output", "text"], env=env, capture=True).strip()
+    if caller != t["account"]:
+        raise Refusal(f"profile {t['profile']} is account {caller}, not {t['account']}")
+
+
+def check_tree(repo):
+    if run(["git", "status", "--porcelain"], cwd=repo, capture=True).strip():
+        raise Refusal("the checkout has uncommitted or untracked changes")
+    run(["git", "fetch", "--quiet", "origin", "main"], cwd=repo)
+    sha = run(["git", "rev-parse", "HEAD"], cwd=repo, capture=True).strip()
+    if subprocess.run(["git", "merge-base", "--is-ancestor", sha, "origin/main"],
+                      cwd=repo).returncode != 0:
+        raise Refusal(f"{sha} is not on origin/main: land it first")
+    return sha
+
+
+def write_zip(binary, zip_path):
+    """bootstrap, mode 0755, fixed timestamp: the same binary gives the same zip."""
+    zip_path.parent.mkdir(parents=True, exist_ok=True)
+    info = zipfile.ZipInfo("bootstrap", date_time=ZIP_EPOCH)
+    info.create_system = 3  # unix, so external_attr carries the mode
+    info.external_attr = 0o100755 << 16
+    info.compress_type = zipfile.ZIP_DEFLATED
+    tmp = zip_path.with_suffix(".zip.tmp")
+    with zipfile.ZipFile(tmp, "w") as z:
+        z.writestr(info, binary.read_bytes(), compresslevel=9)
+    tmp.replace(zip_path)
+
+
+def build(repo, target, t, env):
+    """Build every bin; return {bin: zip path}."""
+    manifest = repo / t["cargo_manifest"]
+    cmd = ["cargo", "build", "--manifest-path", str(manifest), "--release",
+           "--locked", "--target", RUST_TARGET]
+    for bin_name in t["bins"]:
+        cmd += ["--bin", bin_name]
+    run(cmd, cwd=repo, env=env)
+    # Cargo decides the target dir (CARGO_TARGET_DIR, .cargo/config, the
+    # workspace root); ask it rather than guess.
+    meta = json.loads(run(["cargo", "metadata", "--manifest-path", str(manifest),
+                           "--format-version", "1", "--no-deps"],
+                          cwd=repo, env=env, capture=True))
+    target_dir = Path(meta["target_directory"])
+    zips = {}
+    for bin_name in t["bins"]:
+        binary = target_dir / RUST_TARGET / "release" / bin_name
+        if not binary.is_file():
+            raise Refusal(f"cargo built no {binary}")
+        zips[bin_name] = target_dir / "deploy-lambda" / target / bin_name / "bootstrap.zip"
+        write_zip(binary, zips[bin_name])
+        say(f"built {bin_name} -> {zips[bin_name]}")
+    return zips
+
+
+def refused_changes(plan, allow_replace):
+    """Addresses the plan would delete, other than allowed replaces."""
+    refused = []
+    for rc in plan.get("resource_changes") or []:
+        actions = rc["change"]["actions"]
+        if "delete" not in actions:
+            continue
+        if "create" in actions and rc["address"] in allow_replace:
+            continue
+        refused.append(f"{rc['address']} ({'+'.join(actions)})")
+    return refused
+
+
+def plan_and_apply(infra, t, zips, sha, env, work):
+    tf = ["terraform", f"-chdir={infra}"]
+    run(tf + ["init", "-input=false", "-backend-config=backend.hcl"], env=env)
+    plan_file = str(Path(work) / "tfplan")
+    cmd = tf + ["plan", "-input=false", f"-out={plan_file}", f"-var=deploy_commit={sha}"]
+    if "var_file" in t:
+        cmd.append(f"-var-file={t['var_file']}")
+    for bin_name, b in t["bins"].items():
+        cmd.append(f"-var={b['zip_var']}={zips[bin_name]}")
+    run(cmd, env=env)
+    plan = json.loads(run(tf + ["show", "-json", plan_file], env=env, capture=True))
+    refused = refused_changes(plan, t["allow_replace"])
+    if refused:
+        raise Refusal("the plan deletes or replaces resources; not applying:\n  "
+                      + "\n  ".join(refused))
+    run(tf + ["apply", "-input=false", plan_file], env=env)
+
+
+def b64_sha256(path):
+    return base64.b64encode(hashlib.sha256(path.read_bytes()).digest()).decode()
+
+
+def check_deployed(infra, t, zips, sha, env):
+    for bin_name, b in t["bins"].items():
+        fn = run(["terraform", f"-chdir={infra}", "output", "-raw", b["function_output"]],
+                 env=env, capture=True).strip()
+        aws = ["aws", "lambda", "--region", t["region"]]
+        run(aws + ["wait", "function-updated-v2", "--function-name", fn], env=env)
+        cfg = json.loads(run(aws + ["get-function-configuration", "--function-name", fn,
+                                    "--output", "json"], env=env, capture=True))
+        built = b64_sha256(zips[bin_name])
+        if cfg.get("CodeSha256") != built:
+            raise Refusal(f"{fn} runs code {cfg.get('CodeSha256')}, not the built zip {built}")
+        if cfg.get("Description") != f"commit {sha}":
+            raise Refusal(f"{fn}'s description is {cfg.get('Description')!r}, not 'commit {sha}'")
+        say(f"{fn} runs {built} (commit {sha})")
+
+
+def smoke(repo, target, t, infra, sha, env):
+    hook = repo / t["smoke"]
+    if not hook.is_file():
+        raise Refusal(f"smoke hook {t['smoke']} does not exist")
+    hook_env = dict(env, DEPLOY_TARGET=target, DEPLOY_COMMIT=sha,
+                    DEPLOY_INFRA=str(infra), DEPLOY_REGION=t["region"])
+    run([str(hook)], cwd=repo, env=hook_env)
+
+
+def deploy(repo, target, t):
+    env = dict(os.environ, AWS_PROFILE=t["profile"])
+    infra = (repo / t["infra"]).resolve()
+    check_account(t, env)
+    sha = check_tree(repo)
+    say(f"deploying {sha} to {target} (account {t['account']})")
+    zips = build(repo, target, t, env)
+    with tempfile.TemporaryDirectory(prefix="deploy-lambda-") as work:
+        plan_and_apply(infra, t, zips, sha, env, work)
+    check_deployed(infra, t, zips, sha, env)
+    smoke(repo, target, t, infra, sha, env)
+    say(f"{sha} is live on {target}")
+
+
+def main(argv):
+    if len(argv) != 1 or argv[0].startswith("-"):
+        print("usage: deploy-lambda <target>   (a table in .amber/deploy.toml)", file=sys.stderr)
+        return 2
+    target = argv[0]
+    try:
+        repo = Path(run(["git", "rev-parse", "--show-toplevel"], capture=True).strip())
+        engine, t = load_manifest(repo, target)
+        if os.environ.get(PINNED_ENV) != engine:
+            return hand_off(repo, engine, argv)
+        deploy(repo, target, t)
+        return 0
+    except Refusal as e:
+        print(f"deploy-lambda: refusing: {e}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

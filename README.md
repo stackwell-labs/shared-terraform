@@ -267,6 +267,72 @@ To hand an existing instance's role to another root, move it before setting
 Outputs: `rule_arn`, `role_arn` (the role the target uses, given or created).
 `alarms-to-shriek-role` outputs `role_arn`, `role_name`.
 
+## `deploy-lambda`: the box deploy engine
+
+`scripts/deploy-lambda` deploys a Rust Lambda service from the box
+(shared-terraform#11), in place of each repo's own `deploy-live.sh` and
+`build-lambda.sh`. The repo describes its targets in `.amber/deploy.toml`;
+the engine owns the safety steps, so every service gets them by construction:
+
+```mermaid
+flowchart LR
+  A[account is<br>the target's] --> B[clean tree,<br>HEAD on origin/main]
+  B --> C[cargo build,<br>reproducible zips]
+  C --> D[plan: no delete,<br>replace only if allowed]
+  D --> E[apply that plan]
+  E --> F[each function runs<br>the built zip and<br>names this commit]
+  F --> G[repo's smoke hook]
+```
+
+Run it from anywhere inside the service repo (Python 3.11+, `aws`,
+`terraform`, `cargo` with the musl target):
+
+```sh
+~/agent-platform/shared-terraform/scripts/deploy-lambda live
+```
+
+```toml
+# .amber/deploy.toml
+engine = "<40-hex shared-terraform commit on origin/main>"
+
+[live]                                # a target: `deploy-lambda live`
+account = "950916120278"              # the target's one home for its account id
+profile = "compute-tmp"               # AWS_PROFILE for every aws/terraform call
+region = "us-east-1"
+infra = "infra/aws"                   # the Terraform root; init reads backend.hcl
+var_file = "live.tfvars"              # optional, relative to infra
+cargo_manifest = "Cargo.toml"
+allow_replace = []                    # optional: addresses the plan may replace
+smoke = "scripts/smoke-deploy.sh"     # required, run after the checks
+
+[live.bins.compute-gateway-service]   # a cargo bin, zipped as `bootstrap`
+zip_var = "lambda_zip_path"           # the root's variable for its zip path
+function_output = "lambda_function_name"  # the root's output naming its function
+```
+
+- **Pinned.** Whichever copy you invoke hands off to the copy at the
+  manifest's `engine` commit (it must be on shared-terraform's origin/main), so
+  a repo keeps the engine it was tested with until it moves the pin.
+- **The root** must declare `deploy_commit` (the engine passes `-var=deploy_commit=<sha>`)
+  and set each function's description to `commit <sha>` (rust-lambda-service's
+  `description`), and must declare each bin's `zip_var` and `function_output`.
+- **The build** is `cargo build --release --locked --target
+  x86_64-unknown-linux-musl --bin …`. The engine asks `cargo metadata` where
+  the binaries are, so `CARGO_TARGET_DIR` is honoured, and writes each zip
+  under `<target dir>/deploy-lambda/<target>/<bin>/` with a fixed timestamp
+  and mode 0755: the same binary gives the same zip.
+- **The plan guard** refuses any `delete`; a replace (delete and create) only
+  of an address in `allow_replace`. A plain delete is refused even then.
+- **The smoke hook** runs from the repo root with `AWS_PROFILE`,
+  `DEPLOY_TARGET`, `DEPLOY_COMMIT`, `DEPLOY_INFRA` (the root's absolute path,
+  for `terraform -chdir="$DEPLOY_INFRA" output`) and `DEPLOY_REGION`. A
+  non-zero exit fails the deploy. Service-specific checks (an unauthenticated
+  401, a journey) live here.
+
+Tests: `python3 -m unittest discover -s scripts/tests -v` runs the engine
+against a stubbed `aws`, `terraform` and `cargo`, one test per refusal
+(amber-ci job `deploy-lambda`).
+
 ## Versioning
 
 Tagged releases (`vMAJOR.MINOR.PATCH`). Consumers pin via `?ref=vX.Y.Z`.

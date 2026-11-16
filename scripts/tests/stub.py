@@ -79,6 +79,11 @@ elif tool == "cargo":
         release = target_dir / "x86_64-unknown-linux-musl" / "release"
         release.mkdir(parents=True, exist_ok=True)
         bins = [args[i + 1] for i, a in enumerate(args) if a == "--bin"]
+        # Bins a non-default workspace member owns: like real cargo, found
+        # only with --workspace (shared-terraform#17).
+        for b in scenario.get("member_bins", []):
+            if b in bins and "--workspace" not in args:
+                sys.exit(f"error: no bin target named `{b}` in default-run packages")
         for b in bins:
             if b not in scenario.get("missing_bins", []):
                 (release / b).write_bytes(f"binary {b}\n".encode())

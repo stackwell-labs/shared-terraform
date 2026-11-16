@@ -192,6 +192,16 @@ class DeployLambdaTest(unittest.TestCase):
         zip_path = json.loads((self.f.stub / "plan-vars.json").read_text())["lambda_zip_path"]
         self.assertTrue(zip_path.startswith(str(target_dir)), zip_path)
 
+    def test_builds_bin_from_non_default_member(self):
+        # chirp-auth's root package is the default; svc-tick stands in for its
+        # canary member's bin (shared-terraform#17).
+        self.f.scenario["member_bins"] = ["svc-tick"]
+        out = self.f.run()
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+        zip_path = json.loads((self.f.stub / "plan-vars.json").read_text())["tick_zip_path"]
+        with zipfile.ZipFile(zip_path) as z:
+            self.assertEqual(z.read("bootstrap"), b"binary svc-tick\n")
+
     def test_allowed_replace_applies(self):
         self.f.scenario["changes"] = [change("aws_lambda_permission.allowed", "delete", "create")]
         out = self.f.run()

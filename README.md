@@ -344,8 +344,12 @@ smoke = "web/infra/aws/deploy-web.sh" # may publish, then check (below)
   second needs no second cargo bin. An output listed twice in a target is
   refused: one function runs one zip. It replaces `function_output` (one
   string), which is refused with a pointer here.
-- **The build** is `cargo build --release --locked --target
-  x86_64-unknown-linux-musl --bin …`. The engine asks `cargo metadata` where
+- **The build** is `cargo build --workspace --release --locked --target
+  x86_64-unknown-linux-musl --bin …`. `--workspace` finds each bin in any
+  workspace member, not only the default packages (shared-terraform#17), and
+  cargo builds only the packages that own one. Keep bin names unique across
+  the workspace: cargo only warns when two share one, and one binary
+  overwrites the other. The engine asks `cargo metadata` where
   the binaries are, so `CARGO_TARGET_DIR` is honoured, and writes each zip
   under `<target dir>/deploy-lambda/<target>/<bin>/` with a fixed timestamp
   and mode 0755: the same binary gives the same zip.

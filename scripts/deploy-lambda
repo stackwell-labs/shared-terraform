@@ -354,8 +354,12 @@ def write_zip(binary, files, zip_path):
 def build(repo, target, t, env):
     """Build every bin; return {bin: zip path}."""
     manifest = repo / t["cargo_manifest"]
-    cmd = ["cargo", "build", "--manifest-path", str(manifest), "--release",
-           "--locked", "--target", RUST_TARGET]
+    # --workspace: look each --bin up in every workspace member, not just the
+    # default packages, so a bin from a non-default member builds
+    # (shared-terraform#17). Cargo still compiles only the packages that own
+    # one of the bins.
+    cmd = ["cargo", "build", "--manifest-path", str(manifest), "--workspace",
+           "--release", "--locked", "--target", RUST_TARGET]
     for bin_name in t["bins"]:
         cmd += ["--bin", bin_name]
     run(cmd, cwd=repo, env=env)

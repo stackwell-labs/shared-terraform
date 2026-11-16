@@ -427,6 +427,130 @@ class HookTest(unittest.TestCase):
         self.assertEqual(self.f.calls(), [])
 
 
+# A prebuild that builds a site into an ignored dir, and logs that it ran (in
+# order with the stubs' calls) with its DEPLOY_* variables.
+PREBUILD = """\
+#!/usr/bin/env bash
+set -e
+printf '{"tool": "prebuild", "args": [], "profile": "%s", "env": {"DEPLOY_COMMIT": "%s"}}\\n' \\
+  "$AWS_PROFILE" "$DEPLOY_COMMIT" >> "$STUB_DIR/calls.log"
+rm -rf site/public
+mkdir -p site/public/assets
+echo '<html>' > site/public/index.html
+echo 'js' > site/public/assets/app.js
+chmod 755 site/public/assets/app.js
+echo '{}' > site/public/app-config.json
+"""
+
+
+class IncludeTest(unittest.TestCase):
+    """The prebuild hook and a bin's include (shared-terraform#14)."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="deploy-lambda-test-"))
+        self.f = Fixture(self.tmp)
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp)
+
+    def setup(self, prebuild=PREBUILD, include='{ "frontend/public" = "site/public" }'):
+        manifest = MANIFEST.format(engine=PIN)
+        if prebuild is not None:
+            self.f.write("scripts/prebuild.sh", prebuild)
+            (self.f.repo / "scripts/prebuild.sh").chmod(0o755)
+            manifest = manifest.replace('smoke = ', 'prebuild = "scripts/prebuild.sh"\nsmoke = ')
+        if include is not None:
+            manifest = manifest.replace('function_output = "lambda_function_name"\n',
+                                        'function_output = "lambda_function_name"\n'
+                                        f'include = {include}\n')
+        self.f.write(".amber/deploy.toml", manifest)
+        self.f.write(".gitignore", "site/public/\n")
+        self.f.sha = commit_all(self.f.repo)
+
+    def zip_of(self, var):
+        return Path(json.loads((self.f.stub / "plan-vars.json").read_text())[var])
+
+    def assertRefused(self, out, needle):
+        self.assertEqual(out.returncode, 1, out.stdout + out.stderr)
+        self.assertIn("refusing", out.stderr)
+        self.assertIn(needle, out.stderr)
+
+    def test_prebuild_runs_then_include_ships_beside_bootstrap(self):
+        self.setup()
+        out = self.f.run()
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+        tools = [c["tool"] for c in self.f.calls()]
+        self.assertEqual(tools[:3], ["aws", "prebuild", "cargo"])
+        pre = next(c for c in self.f.calls() if c["tool"] == "prebuild")
+        self.assertEqual(pre["profile"], "svc")
+        self.assertEqual(pre["env"]["DEPLOY_COMMIT"], self.f.sha)
+        self.assertIn("(+3 included file(s))", out.stdout)
+        with zipfile.ZipFile(self.zip_of("lambda_zip_path")) as z:
+            infos = z.infolist()
+            self.assertEqual([i.filename for i in infos],
+                             ["bootstrap", "frontend/public/app-config.json",
+                              "frontend/public/assets/app.js", "frontend/public/index.html"])
+            self.assertEqual(infos[0].external_attr >> 16, 0o100755)
+            # Every included file is 0644, whatever its mode on disk.
+            self.assertEqual({i.external_attr >> 16 for i in infos[1:]}, {0o100644})
+            self.assertEqual({i.date_time for i in infos}, {(1980, 1, 1, 0, 0, 0)})
+            self.assertEqual(z.read("frontend/public/index.html"), b"<html>\n")
+        # A bin with no include still zips bootstrap alone.
+        with zipfile.ZipFile(self.zip_of("tick_zip_path")) as z:
+            self.assertEqual(z.namelist(), ["bootstrap"])
+
+    def test_zip_with_include_is_reproducible(self):
+        self.setup()
+        self.assertEqual(self.f.run().returncode, 0)
+        first = self.zip_of("lambda_zip_path").read_bytes()
+        # The prebuild rewrites every file, with new mtimes, on each run.
+        self.assertEqual(self.f.run().returncode, 0)
+        self.assertEqual(self.zip_of("lambda_zip_path").read_bytes(), first)
+
+    def test_include_without_prebuild(self):
+        self.setup(prebuild=None, include='{ "static" = "assets" }')
+        self.f.write("assets/a.txt", "a")
+        self.f.sha = commit_all(self.f.repo)
+        out = self.f.run()
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+        with zipfile.ZipFile(self.zip_of("lambda_zip_path")) as z:
+            self.assertEqual(z.namelist(), ["bootstrap", "static/a.txt"])
+
+    def test_prebuild_failure_refuses_before_the_build(self):
+        self.setup(prebuild="#!/usr/bin/env bash\nexit 5\n")
+        self.assertRefused(self.f.run(), "prebuild.sh` exited 5")
+        self.assertEqual(self.f.calls("cargo") + self.f.calls("terraform"), [])
+
+    def test_prebuild_may_not_dirty_the_tree(self):
+        self.setup(prebuild=PREBUILD + "echo x > not-ignored.txt\n")
+        self.assertRefused(self.f.run(), "after prebuild scripts/prebuild.sh, the checkout "
+                                         "has uncommitted or untracked changes")
+        self.assertEqual(self.f.calls("cargo") + self.f.calls("terraform"), [])
+
+    def test_missing_include_dir_refuses_before_terraform(self):
+        self.setup(prebuild=None)
+        self.assertRefused(self.f.run(), "bins.svc-service.include: site/public is not a "
+                                         "directory")
+        self.assertEqual(self.f.calls("terraform"), [])
+
+    def test_empty_include_dir_refuses(self):
+        self.setup(prebuild="#!/usr/bin/env bash\nmkdir -p site/public/empty\n")
+        self.assertRefused(self.f.run(), "site/public has no files")
+        self.assertEqual(self.f.calls("terraform"), [])
+
+    def test_symlink_in_include_refuses(self):
+        self.setup(prebuild=PREBUILD + "ln -s /etc/passwd site/public/leak\n")
+        self.assertRefused(self.f.run(), "site/public/leak is not a regular file or directory")
+        self.assertEqual(self.f.calls("terraform"), [])
+
+    def test_unexecutable_prebuild_refuses_before_aws(self):
+        self.setup()
+        (self.f.repo / "scripts/prebuild.sh").chmod(0o644)
+        self.assertRefused(self.f.run(), "prebuild hook scripts/prebuild.sh is not an "
+                                         "executable file")
+        self.assertEqual(self.f.calls(), [])
+
+
 class ManifestTest(unittest.TestCase):
     """A manifest the engine can't read strictly refuses before touching AWS."""
 
@@ -471,6 +595,29 @@ class ManifestTest(unittest.TestCase):
     def test_bins_without_cargo_manifest(self):
         self.refuse(self.base().replace('cargo_manifest = "Cargo.toml"\n', ""),
                     "[live]: bins and cargo_manifest go together")
+
+    def include(self, value):
+        return self.base().replace('function_output = "tick_function_name"\n',
+                                   'function_output = "tick_function_name"\n'
+                                   f'include = {value}\n')
+
+    def test_include_may_not_name_bootstrap(self):
+        for zip_dir in ("bootstrap", "bootstrap/x"):
+            self.refuse(self.include(f'{{ "{zip_dir}" = "web" }}'),
+                        f"zip path '{zip_dir}' would collide with bootstrap")
+
+    def test_include_paths_are_plain_relative(self):
+        for value in ('{ "/abs" = "web" }', '{ "a/../b" = "web" }', '{ "a/" = "web" }'):
+            self.refuse(self.include(value), "must be relative")
+        for value in ('{ "a" = "../outside" }', '{ "a" = "/etc" }', '{ "a" = "." }',
+                      '{ "a" = 3 }'):
+            self.refuse(self.include(value), "must name a repo-relative dir")
+
+    def test_include_paths_may_not_nest(self):
+        self.refuse(self.include('{ "a" = "x", "a/b" = "y" }'), "zip path 'a/b' is inside 'a'")
+
+    def test_include_must_be_a_table(self):
+        self.refuse(self.include('"web"'), "include must be a non-empty dict")
 
     def test_bad_engine(self):
         self.refuse(self.base().replace(PIN, "main"), "engine must be a 40-hex")

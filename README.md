@@ -279,12 +279,13 @@ them by construction:
 ```mermaid
 flowchart LR
   A[account is<br>the target's] --> B[clean tree,<br>HEAD on origin/main]
-  B --> C[cargo build,<br>reproducible zips]
+  B --> P[repo's prebuild;<br>tree still clean]
+  P --> C[cargo build,<br>reproducible zips<br>with includes]
   C --> D[plan: no delete,<br>replace only if allowed;<br>repo's plan_check]
   D --> E[apply that plan]
   E --> F[each function runs<br>the built zip and<br>names this commit]
   F --> G[repo's smoke hook]
-  B -. no bins .-> D
+  P -. no bins .-> D
   E -. no bins .-> G
 ```
 
@@ -311,10 +312,12 @@ allow_replace = []                    # optional: addresses the plan may replace
 smoke = "scripts/smoke-deploy.sh"     # required, run after the checks
 plan_env = "scripts/plan-env.sh"      # optional: KEY=value lines for terraform
 plan_check = "scripts/plan-check.sh"  # optional: plan JSON on stdin; non-zero refuses
+prebuild = "scripts/prebuild.sh"      # optional: run before cargo build (an SPA's bundle)
 
 [live.bins.compute-gateway-service]   # a cargo bin, zipped as `bootstrap`
 zip_var = "lambda_zip_path"           # the root's variable for its zip path
 function_output = "lambda_function_name"  # the root's output naming its function
+include = { "frontend/public" = "web/dist" }  # optional: zip path = repo-relative dir
 
 [web]                                 # a Terraform-only target: no bins
 account = "950916120278"
@@ -338,6 +341,18 @@ smoke = "web/infra/aws/deploy-web.sh" # may publish, then check (below)
   the binaries are, so `CARGO_TARGET_DIR` is honoured, and writes each zip
   under `<target dir>/deploy-lambda/<target>/<bin>/` with a fixed timestamp
   and mode 0755: the same binary gives the same zip.
+- **`include`** (optional, per bin, shared-terraform#14) adds the files under
+  each repo-relative dir to that bin's zip, under its zip path beside
+  `bootstrap`, in sorted order, mode 0644, with the same fixed timestamp: the
+  same files still give the same zip. Both paths are plain relative ones (no
+  `..`, `.` or leading `/`); a zip path may not be or hold `bootstrap`, nor
+  sit inside another. At build time it refuses a dir that is missing or empty,
+  or holds a symlink or anything but files and dirs.
+- **`prebuild`** (optional, shared-terraform#14) runs after the tree check and
+  `plan_env`, before `cargo build`, e.g. `npm ci && npm run build:web` to make
+  the files an `include` ships. A non-zero exit refuses. It may write only
+  gitignored files: the engine checks the tree is still clean afterwards, so
+  what deploys is still this commit plus what it built.
 - **A Terraform-only target** (shared-terraform#13) has no `bins` and no
   `cargo_manifest`: the engine builds nothing and checks no function, and
   keeps every other step, `deploy_commit` included. A target with one of the

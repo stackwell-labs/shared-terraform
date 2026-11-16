@@ -17,7 +17,8 @@ them by construction:
      plan deletes nothing (a replace only of an address listed in
      allow_replace), the repo's plan_check hook (if any) accepts it, and
      exactly that plan is applied;
-  5. each function runs the zip built here and names this commit;
+  5. each function runs the zip built here and names this commit (a bin may
+     name several functions, all running its one zip: shared-terraform#15);
   6. the repo's smoke hook passes.
 
 Run it from anywhere inside the service repo:
@@ -76,7 +77,7 @@ TARGET_FIELDS = {
 }
 OPTIONAL_TARGET_FIELDS = {"var_file", "allow_replace", "plan_env", "plan_check",
                           "prebuild", "cargo_manifest", "bins"}
-BIN_FIELDS = {"zip_var": str, "function_output": str, "include": dict}
+BIN_FIELDS = {"zip_var": str, "function_outputs": list, "include": dict}
 OPTIONAL_BIN_FIELDS = {"include"}
 # A zip entry's timestamp: the earliest a zip can hold, so the zip's bytes
 # depend only on the files it carries.
@@ -156,12 +157,26 @@ def validate_target(name, t):
     if ("bins" in t) != ("cargo_manifest" in t):
         raise Refusal(f"{where}: bins and cargo_manifest go together "
                       "(both, or neither for a Terraform-only target)")
+    outputs = []
     for bin_name, b in t.setdefault("bins", {}).items():
         if not isinstance(b, dict):
             raise Refusal(f"{where}: bins.{bin_name} must be a table")
+        if "function_output" in b:
+            raise Refusal(f"{where} bins.{bin_name}: function_output is now "
+                          "function_outputs, a list (shared-terraform#15)")
         check_fields(f"{where} bins.{bin_name}", b, BIN_FIELDS, OPTIONAL_BIN_FIELDS)
+        fns = b["function_outputs"]
+        if not fns or not all(isinstance(o, str) and o for o in fns):
+            raise Refusal(f"{where} bins.{bin_name}: function_outputs must be a non-empty "
+                          "list of the root's output names")
+        outputs += fns
         b["include"] = check_include(f"{where} bins.{bin_name}.include",
                                      b.get("include", {}))
+    # One function runs one zip: an output listed twice is either redundant or
+    # a function checked against two bins' zips, which can never pass.
+    twice = sorted({o for o in outputs if outputs.count(o) > 1})
+    if twice:
+        raise Refusal(f"{where}: function_outputs lists {', '.join(twice)} more than once")
     allow = t.setdefault("allow_replace", [])
     if not all(isinstance(a, str) and a for a in allow):
         raise Refusal(f"{where}: allow_replace must list resource addresses")
@@ -406,19 +421,23 @@ def b64_sha256(path):
 
 
 def check_deployed(infra, t, zips, sha, env):
+    """Every function each bin names runs that bin's zip and names this commit."""
+    aws = ["aws", "lambda", "--region", t["region"]]
     for bin_name, b in t["bins"].items():
-        fn = run(["terraform", f"-chdir={infra}", "output", "-raw", b["function_output"]],
-                 env=env, capture=True).strip()
-        aws = ["aws", "lambda", "--region", t["region"]]
-        run(aws + ["wait", "function-updated-v2", "--function-name", fn], env=env)
-        cfg = json.loads(run(aws + ["get-function-configuration", "--function-name", fn,
-                                    "--output", "json"], env=env, capture=True))
         built = b64_sha256(zips[bin_name])
-        if cfg.get("CodeSha256") != built:
-            raise Refusal(f"{fn} runs code {cfg.get('CodeSha256')}, not the built zip {built}")
-        if cfg.get("Description") != f"commit {sha}":
-            raise Refusal(f"{fn}'s description is {cfg.get('Description')!r}, not 'commit {sha}'")
-        say(f"{fn} runs {built} (commit {sha})")
+        for output in b["function_outputs"]:
+            fn = run(["terraform", f"-chdir={infra}", "output", "-raw", output],
+                     env=env, capture=True).strip()
+            run(aws + ["wait", "function-updated-v2", "--function-name", fn], env=env)
+            cfg = json.loads(run(aws + ["get-function-configuration", "--function-name", fn,
+                                        "--output", "json"], env=env, capture=True))
+            if cfg.get("CodeSha256") != built:
+                raise Refusal(f"{fn} runs code {cfg.get('CodeSha256')}, "
+                              f"not {bin_name}'s built zip {built}")
+            if cfg.get("Description") != f"commit {sha}":
+                raise Refusal(f"{fn}'s description is {cfg.get('Description')!r}, "
+                              f"not 'commit {sha}'")
+            say(f"{fn} runs {bin_name}'s {built} (commit {sha})")
 
 
 def smoke(repo, hook, target, t, infra, sha, env):

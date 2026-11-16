@@ -283,7 +283,7 @@ flowchart LR
   P --> C[cargo build,<br>reproducible zips<br>with includes]
   C --> D[plan: no delete,<br>replace only if allowed;<br>repo's plan_check]
   D --> E[apply that plan]
-  E --> F[each function runs<br>the built zip and<br>names this commit]
+  E --> F[each function runs<br>its bin's zip and<br>names this commit]
   F --> G[repo's smoke hook]
   P -. no bins .-> D
   E -. no bins .-> G
@@ -316,7 +316,7 @@ prebuild = "scripts/prebuild.sh"      # optional: run before cargo build (an SPA
 
 [live.bins.compute-gateway-service]   # a cargo bin, zipped as `bootstrap`
 zip_var = "lambda_zip_path"           # the root's variable for its zip path
-function_output = "lambda_function_name"  # the root's output naming its function
+function_outputs = ["lambda_function_name"]  # the root's outputs naming the functions it runs
 include = { "frontend/public" = "web/dist" }  # optional: zip path = repo-relative dir
 
 [web]                                 # a Terraform-only target: no bins
@@ -335,7 +335,15 @@ smoke = "web/infra/aws/deploy-web.sh" # may publish, then check (below)
   points elsewhere, for the tests).
 - **The root** must declare `deploy_commit` (the engine passes `-var=deploy_commit=<sha>`)
   and set each function's description to `commit <sha>` (rust-lambda-service's
-  `description`), and must declare each bin's `zip_var` and `function_output`.
+  `description`), and must declare each bin's `zip_var` and every output in
+  its `function_outputs`.
+- **`function_outputs`** (shared-terraform#15) lists the root's outputs naming
+  each function that runs the bin's zip; the engine checks every one runs that
+  zip and is described `commit <sha>`. One binary on two functions (an API and
+  a worker that picks its entrypoint from an env var) lists both, so the
+  second needs no second cargo bin. An output listed twice in a target is
+  refused: one function runs one zip. It replaces `function_output` (one
+  string), which is refused with a pointer here.
 - **The build** is `cargo build --release --locked --target
   x86_64-unknown-linux-musl --bin …`. The engine asks `cargo metadata` where
   the binaries are, so `CARGO_TARGET_DIR` is honoured, and writes each zip

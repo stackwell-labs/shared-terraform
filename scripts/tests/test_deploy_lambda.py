@@ -36,11 +36,11 @@ allow_replace = ["aws_lambda_permission.allowed"]
 
 [live.bins.svc-service]
 zip_var = "lambda_zip_path"
-function_output = "lambda_function_name"
+function_outputs = ["lambda_function_name", "filer_function_name"]
 
 [live.bins.svc-tick]
 zip_var = "tick_zip_path"
-function_output = "tick_function_name"
+function_outputs = ["tick_function_name"]
 """
 
 # A Terraform-only target (shared-terraform#13): a web hosting root, say.
@@ -62,6 +62,9 @@ exit "${SMOKE_EXIT:-0}"
 FUNCTIONS = {
     "fn-service": {"output": "lambda_function_name", "zip_var": "lambda_zip_path"},
     "fn-tick": {"output": "tick_function_name", "zip_var": "tick_zip_path"},
+    # A second function running svc-service's zip (social-graph's erasure
+    # filer, shared-terraform#15).
+    "fn-filer": {"output": "filer_function_name", "zip_var": "lambda_zip_path"},
 }
 
 
@@ -230,7 +233,25 @@ class DeployLambdaTest(unittest.TestCase):
 
     def test_refuses_code_not_the_built_zip(self):
         self.f.scenario["override"] = {"fn-tick": {"CodeSha256": "stale"}}
-        self.assertRefused(self.f.run(), "fn-tick runs code stale, not the built zip")
+        self.assertRefused(self.f.run(), "fn-tick runs code stale, not svc-tick's built zip")
+        self.assertFalse((self.f.stub / "smoke-env").exists())
+
+    def test_checks_every_function_a_bin_names(self):
+        out = self.f.run()
+        self.assertEqual(out.returncode, 0, out.stderr)
+        checked = [c["args"][c["args"].index("--function-name") + 1]
+                   for c in self.f.calls("aws") if "get-function-configuration" in c["args"]]
+        self.assertEqual(checked, ["fn-service", "fn-filer", "fn-tick"])
+        self.assertIn("fn-filer runs svc-service's", out.stdout)
+
+    def test_refuses_second_function_running_another_zip(self):
+        self.f.scenario["override"] = {"fn-filer": {"CodeSha256": "other"}}
+        self.assertRefused(self.f.run(), "fn-filer runs code other, not svc-service's built zip")
+        self.assertFalse((self.f.stub / "smoke-env").exists())
+
+    def test_refuses_second_function_not_this_commit(self):
+        self.f.scenario["override"] = {"fn-filer": {"Description": "commit old"}}
+        self.assertRefused(self.f.run(), "fn-filer's description is 'commit old'")
         self.assertFalse((self.f.stub / "smoke-env").exists())
 
     def test_refuses_description_not_this_commit(self):
@@ -460,9 +481,8 @@ class IncludeTest(unittest.TestCase):
             (self.f.repo / "scripts/prebuild.sh").chmod(0o755)
             manifest = manifest.replace('smoke = ', 'prebuild = "scripts/prebuild.sh"\nsmoke = ')
         if include is not None:
-            manifest = manifest.replace('function_output = "lambda_function_name"\n',
-                                        'function_output = "lambda_function_name"\n'
-                                        f'include = {include}\n')
+            line = 'function_outputs = ["lambda_function_name", "filer_function_name"]\n'
+            manifest = manifest.replace(line, line + f'include = {include}\n')
         self.f.write(".amber/deploy.toml", manifest)
         self.f.write(".gitignore", "site/public/\n")
         self.f.sha = commit_all(self.f.repo)
@@ -579,8 +599,31 @@ class ManifestTest(unittest.TestCase):
         self.refuse(self.base().replace(ACCOUNT, "1234"), "12-digit")
 
     def test_bad_bin(self):
-        self.refuse(self.base().replace('function_output = "tick_function_name"\n', ""),
-                    "bins.svc-tick: missing function_output")
+        self.refuse(self.base().replace('function_outputs = ["tick_function_name"]\n', ""),
+                    "bins.svc-tick: missing function_outputs")
+
+    def test_function_outputs_must_list_names(self):
+        tick = 'function_outputs = ["tick_function_name"]'
+        for value in ('"tick_function_name"', '[""]', '[3]'):
+            self.refuse(self.base().replace(tick, f"function_outputs = {value}"),
+                        "bins.svc-tick: function_outputs must")
+
+    def test_function_outputs_may_not_be_empty(self):
+        self.refuse(self.base().replace('["tick_function_name"]', "[]"),
+                    "bins.svc-tick: function_outputs must be a non-empty")
+
+    def test_old_function_output_names_the_new_field(self):
+        self.refuse(self.base().replace('function_outputs = ["tick_function_name"]',
+                                        'function_output = "tick_function_name"'),
+                    "bins.svc-tick: function_output is now function_outputs, a list")
+
+    def test_function_listed_twice_is_refused(self):
+        tick = '["tick_function_name"]'
+        # Under one bin, or under two (one function checked against two zips).
+        self.refuse(self.base().replace(tick, '["tick_function_name", "tick_function_name"]'),
+                    "lists tick_function_name more than once")
+        self.refuse(self.base().replace(tick, '["tick_function_name", "filer_function_name"]'),
+                    "lists filer_function_name more than once")
 
     def test_empty_bins(self):
         self.refuse(self.base() + WEB_TARGET.format(account=ACCOUNT)
@@ -597,8 +640,8 @@ class ManifestTest(unittest.TestCase):
                     "[live]: bins and cargo_manifest go together")
 
     def include(self, value):
-        return self.base().replace('function_output = "tick_function_name"\n',
-                                   'function_output = "tick_function_name"\n'
+        return self.base().replace('function_outputs = ["tick_function_name"]\n',
+                                   'function_outputs = ["tick_function_name"]\n'
                                    f'include = {value}\n')
 
     def test_include_may_not_name_bootstrap(self):

@@ -114,6 +114,12 @@ variable "function_url" {
   default     = true
 }
 
+variable "unqualified_function_url" {
+  description = "Keep the unqualified Function URL (and its permissions), which invokes $LATEST: the URL callers used before v0.18.0. True (the default) keeps it, so bumping adds the alias's URL beside it. Set false once every caller uses lambda_function_url (the alias's URL): the unqualified one can start the old binary on the new env during an apply (shared-terraform#9). No effect with function_url = false."
+  type        = bool
+  default     = true
+}
+
 variable "function_url_cors" {
   description = "Optional CORS configuration for the Lambda Function URL. Null disables CORS (the default). When set, all four fields are required."
   type = object({

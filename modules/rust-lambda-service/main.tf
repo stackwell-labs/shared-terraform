@@ -116,6 +116,9 @@ resource "aws_lambda_function" "this" {
   timeout                        = var.lambda_timeout_seconds
   reserved_concurrent_executions = var.lambda_reserved_concurrency
   description                    = var.description
+  # Every apply that changes code or config publishes one version holding
+  # both, and only the alias below moves traffic onto it (shared-terraform#9).
+  publish = true
 
   environment {
     variables = merge(var.env, local.config_secret_env)
@@ -146,12 +149,85 @@ resource "aws_lambda_function" "this" {
   }
 }
 
-# The public Function URL and its two public-invoke permissions, unless the
-# caller turns them off (function_url = false) because another ingress, such as
-# an API Gateway, fronts the function. Off, the function has no second public
-# path that bypasses that ingress's throttle.
-resource "aws_lambda_function_url" "this" {
+# What serves (shared-terraform#9). Lambda updates a function's config and its
+# code in two calls, so for seconds during an apply $LATEST runs the previous
+# binary on the new env: a cold start there panics if that binary requires a
+# var the new env dropped. A published version holds the code and the config
+# together, and this alias moves to it in one step once both are in, so
+# nothing invoked through the alias ever sees the mix.
+resource "aws_lambda_alias" "current" {
+  name             = "current"
+  description      = "The version this service serves; moved by each apply (shared-terraform#9)."
+  function_name    = aws_lambda_function.this.function_name
+  function_version = aws_lambda_function.this.version
+}
+
+# The public Function URL on the alias, and its two public-invoke permissions,
+# unless the caller turns them off (function_url = false) because another
+# ingress, such as an API Gateway, fronts the function. Off, the function has
+# no second public path that bypasses that ingress's throttle.
+resource "aws_lambda_function_url" "current" {
   count = var.function_url ? 1 : 0
+
+  function_name      = aws_lambda_function.this.function_name
+  qualifier          = aws_lambda_alias.current.name
+  authorization_type = "NONE"
+
+  dynamic "cors" {
+    for_each = var.function_url_cors == null ? [] : [var.function_url_cors]
+    content {
+      allow_origins  = cors.value.allow_origins
+      allow_methods  = cors.value.allow_methods
+      allow_headers  = cors.value.allow_headers
+      expose_headers = cors.value.expose_headers
+      max_age        = cors.value.max_age
+    }
+  }
+}
+
+resource "aws_lambda_permission" "function_url_public_current" {
+  count = var.function_url ? 1 : 0
+
+  statement_id           = "AllowPublicFunctionUrlInvoke"
+  action                 = "lambda:InvokeFunctionUrl"
+  function_name          = aws_lambda_function.this.function_name
+  qualifier              = aws_lambda_alias.current.name
+  principal              = "*"
+  function_url_auth_type = "NONE"
+}
+
+# The AccessDeniedException workaround below, for the alias.
+resource "aws_cloudformation_stack" "function_url_invoke_public_current" {
+  count = var.function_url ? 1 : 0
+
+  name = "${var.app_name}-current-function-url-invoke-public"
+
+  template_body = jsonencode({
+    AWSTemplateFormatVersion = "2010-09-09"
+    Resources = {
+      FunctionUrlInvokePublic = {
+        Type = "AWS::Lambda::Permission"
+        Properties = {
+          Action                = "lambda:InvokeFunction"
+          FunctionName          = aws_lambda_alias.current.arn
+          Principal             = "*"
+          InvokedViaFunctionUrl = true
+        }
+      }
+    }
+  })
+
+  depends_on = [aws_lambda_function_url.current]
+
+  tags = local.common_tags
+}
+
+# The unqualified Function URL, which invokes $LATEST and so still carries the
+# hazard above. It is the URL every caller had before v0.18.0, so it stays
+# (with its permissions) until the service's callers use the alias's URL and
+# it sets unqualified_function_url = false.
+resource "aws_lambda_function_url" "this" {
+  count = var.function_url && var.unqualified_function_url ? 1 : 0
 
   function_name      = aws_lambda_function.this.function_name
   authorization_type = "NONE"
@@ -169,7 +245,7 @@ resource "aws_lambda_function_url" "this" {
 }
 
 resource "aws_lambda_permission" "function_url_public" {
-  count = var.function_url ? 1 : 0
+  count = var.function_url && var.unqualified_function_url ? 1 : 0
 
   statement_id           = "AllowPublicFunctionUrlInvoke"
   action                 = "lambda:InvokeFunctionUrl"
@@ -182,7 +258,7 @@ resource "aws_lambda_permission" "function_url_public" {
 # InvokedViaFunctionUrl condition that AWS requires for public Function URL
 # invocation, so a CloudFormation stack manages that one permission.
 resource "aws_cloudformation_stack" "function_url_invoke_public" {
-  count = var.function_url ? 1 : 0
+  count = var.function_url && var.unqualified_function_url ? 1 : 0
 
   name = "${var.app_name}-function-url-invoke-public"
 

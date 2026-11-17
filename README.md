@@ -44,9 +44,48 @@ module "service" {
 }
 ```
 
-Outputs: `lambda_function_url`, `lambda_function_name`, `lambda_function_arn`,
-`lambda_invoke_arn`, `lambda_role_arn`, `lambda_role_name`, `log_group_name`,
-`config_secret_arn`, `config_secret_read_statement`.
+Outputs: `lambda_function_url`, `unqualified_function_url`,
+`lambda_function_name`, `lambda_function_arn`, `lambda_invoke_arn`,
+`lambda_alias_name`, `lambda_alias_arn`, `lambda_alias_invoke_arn`,
+`lambda_role_arn`, `lambda_role_name`, `log_group_name`, `config_secret_arn`,
+`config_secret_read_statement`.
+
+**Traffic goes through an alias** (v0.18.0, shared-terraform#9). Lambda
+applies a function's config and its code in two calls, so for 8–20 s of an
+apply `$LATEST` starts the *previous* binary with the *new* env. If the deploy
+dropped a var that binary's boot check requires, every cold start in that
+window panics (drive and granite, 2026-11-14). The module now publishes a
+version on every apply and moves the alias `current` to it once code and
+config are both in, so nothing invoked through the alias sees the mix.
+
+```mermaid
+flowchart LR
+  A[apply] --> B[$LATEST: new env, old code] --> C[$LATEST: new env, new code]
+  C --> D[publish version N] --> E[alias current -> N]
+  U[lambda_function_url] --> E
+  L[unqualified_function_url] --> B
+```
+
+- `lambda_function_url` is now the **alias's** Function URL, a new URL. The
+  old one stays as `unqualified_function_url` (still on `$LATEST`, still
+  exposed to the hazard), so a bump plans only adds and one in-place change:
+  nothing a caller uses goes away.
+- Invoke the alias everywhere: point a CloudFront origin or health check at
+  `lambda_function_url`, an EventBridge target at `lambda_alias_arn`, an API
+  Gateway integration at `lambda_alias_invoke_arn`, each with its
+  `aws_lambda_permission` given `qualifier = lambda_alias_name` (a permission
+  on the function does not cover the alias). `lambda_function_arn` and
+  `lambda_invoke_arn` still name `$LATEST`.
+- Once no caller uses the old URL, set `unqualified_function_url = false`.
+  That plans three deletes, which deploy-lambda's plan guard refuses.
+- Every apply keeps one more version (a 15 MB zip is 15 MB more of the
+  account's code storage); nothing prunes them yet.
+
+**Removing an env var takes two deploys** while anything still invokes
+`$LATEST`: the unqualified URL or ARNs, and the very deploy that bumps to
+v0.18.0, since the alias only serves from the version it publishes. First
+deploy the code that no longer needs the var, then the Terraform that drops
+it.
 
 **The deployed commit** (v0.17.0, shared-terraform#8). `description` sets the
 function's description. A service passes `"commit <sha>"` of the commit it

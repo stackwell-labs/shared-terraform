@@ -714,6 +714,23 @@ class PinTest(unittest.TestCase):
         self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
         self.assertIn(f"engine pinned at shared-terraform {self.landed}", out.stdout)
 
+    def test_hands_off_an_old_schema_manifest(self):
+        # shared-terraform#16: a manifest pinned before a schema change (here
+        # #15's function_output) is the pinned engine's to read. The invoked
+        # copy hands off instead of refusing it under its own, newer schema.
+        (self.st / "scripts/deploy-lambda").write_text(
+            "import sys\nprint('old engine ran', sys.argv[1:])\n")
+        old = commit_all(self.st)
+        f = self.fixture(old)
+        f.write(".amber/deploy.toml", MANIFEST.format(engine=old).replace(
+            'function_outputs = ["tick_function_name"]',
+            'function_output = "tick_function_name"'))
+        commit_all(f.repo)
+        out = f.run(engine=ENGINE)
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+        self.assertIn(f"engine pinned at shared-terraform {old}", out.stdout)
+        self.assertIn("old engine ran ['live']", out.stdout)
+
     def test_refuses_pin_not_on_main(self):
         git(self.st, "commit", "-q", "--allow-empty", "-m", "unlanded")
         unlanded = git(self.st, "rev-parse", "HEAD")

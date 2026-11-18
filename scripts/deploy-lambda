@@ -110,7 +110,10 @@ def run(args, *, cwd=None, env=None, capture=False):
 # --- the manifest ---------------------------------------------------------
 
 
-def load_manifest(repo, target):
+def load_manifest(repo):
+    """The manifest and its pinned engine. Only `engine` is checked here: the
+    rest is the pinned engine's schema, which an older pin may not share, so
+    target_of() checks it in the copy that runs (shared-terraform#16)."""
     path = repo / MANIFEST
     if not path.is_file():
         raise Refusal(f"no {MANIFEST} in {repo}")
@@ -119,6 +122,10 @@ def load_manifest(repo, target):
     engine = doc.get("engine")
     if not isinstance(engine, str) or not SHA_RE.match(engine):
         raise Refusal(f"{MANIFEST}: engine must be a 40-hex shared-terraform commit")
+    return doc, engine
+
+
+def target_of(doc, target):
     targets = {k: v for k, v in doc.items() if k != "engine"}
     for name, value in targets.items():
         if not isinstance(value, dict):
@@ -127,7 +134,7 @@ def load_manifest(repo, target):
         raise Refusal(
             f"{MANIFEST} has no target {target!r} (it has: {', '.join(sorted(targets)) or 'none'})"
         )
-    return engine, validate_target(target, targets[target])
+    return validate_target(target, targets[target])
 
 
 def check_fields(where, table, fields, optional):
@@ -483,10 +490,10 @@ def main(argv):
     target = argv[0]
     try:
         repo = Path(run(["git", "rev-parse", "--show-toplevel"], capture=True).strip())
-        engine, t = load_manifest(repo, target)
+        doc, engine = load_manifest(repo)
         if os.environ.get(PINNED_ENV) != engine:
             return hand_off(repo, engine, argv)
-        deploy(repo, target, t)
+        deploy(repo, target, target_of(doc, target))
         return 0
     except Refusal as e:
         print(f"deploy-lambda: refusing: {e}", file=sys.stderr)

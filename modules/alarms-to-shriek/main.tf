@@ -11,6 +11,11 @@
 # Only ALARM and OK are forwarded. Shriek opens a Critical incident (a phone
 # push) on ALARM and resolves it on OK; INSUFFICIENT_DATA carries no verdict.
 #
+# Each alarm's deletion is forwarded too (its "CloudWatch Alarm Configuration
+# Change" event with operation "delete"). A deleted alarm never sends its OK,
+# so without it an alarm deleted while in ALARM leaves its Shriek incident open
+# for good (shriek#82); Shriek resolves the incident on the deletion instead.
+#
 # var.exclude_alarm_names drops alarms by name, for an account that also holds
 # alarms nobody should be woken for (the 081 data vault's test-plane tables).
 # The filter runs here, at the source, so an excluded alarm never leaves the
@@ -18,21 +23,30 @@
 
 data "aws_caller_identity" "current" {}
 
+locals {
+  # Applies to both kinds of event, so an excluded alarm's deletion stays in
+  # the account too.
+  exclude = length(var.exclude_alarm_names) == 0 ? {} : {
+    alarmName = [{ "anything-but" = { wildcard = var.exclude_alarm_names } }]
+  }
+}
+
 resource "aws_cloudwatch_event_rule" "alarms" {
   name        = "${var.name_prefix}-alarms-to-shriek"
-  description = "Forward CloudWatch alarm ALARM/OK transitions to Shriek (phone paging)."
+  description = "Forward CloudWatch alarm ALARM/OK transitions and deletions to Shriek (phone paging)."
   event_pattern = jsonencode({
-    source        = ["aws.cloudwatch"]
-    "detail-type" = ["CloudWatch Alarm State Change"]
-    account       = [data.aws_caller_identity.current.account_id]
-    detail = merge(
-      { state = { value = ["ALARM", "OK"] } },
-      # Only present when exclusions are set, so an instance without them keeps
-      # exactly the v0.9.0 pattern (and a version bump plans no change).
-      length(var.exclude_alarm_names) == 0 ? {} : {
-        alarmName = [{ "anything-but" = { wildcard = var.exclude_alarm_names } }]
+    source  = ["aws.cloudwatch"]
+    account = [data.aws_caller_identity.current.account_id]
+    "$or" = [
+      {
+        "detail-type" = ["CloudWatch Alarm State Change"]
+        detail        = merge({ state = { value = ["ALARM", "OK"] } }, local.exclude)
       },
-    )
+      {
+        "detail-type" = ["CloudWatch Alarm Configuration Change"]
+        detail        = merge({ operation = ["delete"] }, local.exclude)
+      },
+    ]
   })
   tags = var.tags
 }

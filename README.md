@@ -232,13 +232,16 @@ Outputs: `role_arn`, `role_name`, `oidc_provider_arn`.
 
 Routes every CloudWatch alarm in an account to Shriek, which pages a phone:
 an EventBridge rule on the default bus matches `CloudWatch Alarm State Change`
-(ALARM and OK only) and forwards it to Shriek's bus through a role that can
+(ALARM and OK only) and `CloudWatch Alarm Configuration Change` with
+operation `delete`, and forwards them to Shriek's bus through a role that can
 only `events:PutEvents` there. Shriek opens a Critical incident on ALARM and
-resolves it on OK.
+resolves it on OK, or on the alarm's deletion: a deleted alarm sends no OK,
+so before v0.19.0 an alarm deleted while in ALARM left its incident open for
+good (shriek#82).
 
 ```mermaid
 flowchart LR
-  A[CloudWatch alarm] -->|state change event| B[default bus, product acct]
+  A[CloudWatch alarm] -->|state change or deletion event| B[default bus, product acct]
   B -->|rule + role| C[default bus, shriek acct 653135933102]
   C -->|rule| D[shriek-service-tick]
   D -->|Critical incident| E[FCM push]
@@ -256,14 +259,15 @@ module "alarms_to_shriek" {
 ```
 
 To keep some alarms off the phone, pass EventBridge wildcard patterns of alarm
-names to leave out. They are dropped at the source, so they never reach Shriek:
+names to leave out. They are dropped at the source (their deletions too), so
+they never reach Shriek:
 
 ```hcl
   exclude_alarm_names = ["t_*_test_*"] # the 081 vault's test-plane tables
 ```
 
-Without it, the rule's pattern is exactly v0.9.0's, so bumping the ref plans
-no change. The provider constraint is `>= 5.0, < 7.0`, so roots on AWS provider
+Bumping the ref to v0.19.0 or later from an earlier one plans one in-place
+change, the rule's pattern, which now matches deletions too. The provider constraint is `>= 5.0, < 7.0`, so roots on AWS provider
 5.x and 6.x can both use it.
 
 Use it **once per account**, because the rule forwards every alarm in the

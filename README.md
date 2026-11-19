@@ -44,6 +44,10 @@ module "service" {
 }
 ```
 
+Its AWS provider constraint is `>= 5.0, < 7.0` (v0.20.0, shared-terraform#22),
+as is `lambda-execution-role`'s, so a root can move to provider 6.x; before
+v0.20.0 both pinned `~> 5.0`.
+
 Outputs: `lambda_function_url`, `unqualified_function_url`,
 `lambda_function_name`, `lambda_function_arn`, `lambda_invoke_arn`,
 `lambda_alias_name`, `lambda_alias_arn`, `lambda_alias_invoke_arn`,

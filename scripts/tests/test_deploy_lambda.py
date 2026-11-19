@@ -331,6 +331,68 @@ class DeployLambdaTest(unittest.TestCase):
         self.assertRefused(self.f.run(), "fn-filer's alias current (version 3)'s description "
                            "is 'commit old'")
 
+    # --- pruning old versions (shared-terraform#20) -----------------------
+
+    def deleted(self):
+        return [(c["args"][c["args"].index("--function-name") + 1],
+                 c["args"][c["args"].index("--qualifier") + 1])
+                for c in self.f.calls("aws") if "delete-function" in c["args"]]
+
+    def test_prunes_all_but_the_newest_versions(self):
+        # fn-service's alias serves 7 of versions 1-7: 1 and 2 go. fn-filer
+        # has 3, so keeps them all; fn-tick has no alias and isn't pruned.
+        out = self.f.run()
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+        self.assertEqual(self.deleted(), [("fn-service", "1"), ("fn-service", "2")])
+        self.assertIn("fn-service: deleted 2 old version(s) (1, 2)", out.stdout)
+        self.assertIn("fn-filer: deleted 0 old version(s)", out.stdout)
+        self.assertNotIn("fn-tick:", out.stdout)
+        self.assertFalse(any("fn-tick" in c["args"] for c in self.f.calls("aws")
+                             if "list-versions-by-function" in c["args"]))
+        # Every version pruning keeps is still there for the next deploy.
+        out = self.f.run()
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+        self.assertEqual(self.deleted(), [])
+
+    def test_keeps_versions_an_alias_names(self):
+        fn = self.f.scenario["functions"]["fn-service"]
+        fn["versions"] = [str(v) for v in range(1, 13)]
+        fn["alias"] = "12"
+        fn["aliases"] = [
+            {"Name": "rollback", "FunctionVersion": "2"},
+            {"Name": "canary", "FunctionVersion": "4",
+             "RoutingConfig": {"AdditionalVersionWeights": {"5": 0.1}}},
+        ]
+        out = self.f.run()
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+        self.assertEqual([v for f, v in self.deleted() if f == "fn-service"],
+                         ["1", "3", "6", "7"])
+
+    def test_orders_versions_by_number_not_text(self):
+        fn = self.f.scenario["functions"]["fn-service"]
+        fn["versions"] = ["9", "10", "11", "12", "13", "14"]
+        fn["alias"] = "14"
+        self.assertEqual(self.f.run().returncode, 0)
+        self.assertEqual([v for f, v in self.deleted() if f == "fn-service"], ["9"])
+
+    def test_no_pruning_when_smoke_fails(self):
+        out = self.f.run(SMOKE_EXIT="1")
+        self.assertEqual(out.returncode, 1)
+        self.assertEqual(self.deleted(), [])
+
+    def test_no_pruning_when_the_checks_refuse(self):
+        self.f.scenario["version_override"] = {"fn-service": {"CodeSha256": "previous"}}
+        self.assertRefused(self.f.run(), "runs code previous")
+        self.assertEqual(self.deleted(), [])
+
+    def test_failed_delete_fails_the_deploy_after_it_is_live(self):
+        self.f.scenario["delete_error"] = {"fn-service": ["2"]}
+        out = self.f.run()
+        self.assertRefused(out, f"{self.f.sha} is live on live, but pruning old versions "
+                           "failed: `aws lambda --region us-east-1 delete-function "
+                           "--function-name fn-service --qualifier 2` exited 254")
+        self.assertTrue((self.f.stub / "smoke-env").exists())
+
     def test_refuses_alias_on_latest(self):
         self.f.scenario["functions"]["fn-service"]["alias"] = "$LATEST"
         self.assertRefused(self.f.run(), "fn-service's alias current serves '$LATEST', "

@@ -29,6 +29,14 @@ def deployed():
     return json.loads(p.read_text()) if p.exists() else {}
 
 
+def published(fn, f):
+    """fn's published versions, oldest first, less those deleted: by default
+    1 to its alias's version, one per apply (shared-terraform#20)."""
+    gone = json.loads((state / "deleted.json").read_text()) if (state / "deleted.json").exists() else []
+    versions = f.get("versions", [str(v) for v in range(1, int(f.get("alias", 0)) + 1)])
+    return [v for v in versions if [fn, v] not in gone]
+
+
 def opt(name):
     return next((a.split("=", 1)[1] for a in args if a.startswith(name + "=")), None)
 
@@ -67,6 +75,27 @@ if tool == "aws":
         else:
             cfg.update(scenario.get("override", {}).get(fn, {}))
         print(json.dumps(cfg))
+    elif "list-versions-by-function" in args:
+        fn = args[args.index("--function-name") + 1]
+        versions = ["$LATEST"] + published(fn, scenario["functions"][fn])
+        print(json.dumps({"Versions": [{"Version": v} for v in versions]}))
+    elif "list-aliases" in args:
+        fn = args[args.index("--function-name") + 1]
+        f = scenario["functions"][fn]
+        aliases = [{"Name": "current", "FunctionVersion": f["alias"]}] + f.get("aliases", [])
+        print(json.dumps({"Aliases": aliases}))
+    elif "delete-function" in args:
+        fn = args[args.index("--function-name") + 1]
+        version = args[args.index("--qualifier") + 1]
+        if version in scenario.get("delete_error", {}).get(fn, []):
+            print("An error occurred (ResourceConflictException) when calling the "
+                  "DeleteFunction operation", file=sys.stderr)
+            sys.exit(254)
+        if version not in published(fn, scenario["functions"][fn]):
+            sys.exit(f"stub aws: no version {version} of {fn} to delete")
+        p = state / "deleted.json"
+        gone = json.loads(p.read_text()) if p.exists() else []
+        p.write_text(json.dumps(gone + [[fn, version]]))
     else:
         sys.exit(f"stub aws: unexpected {args}")
 

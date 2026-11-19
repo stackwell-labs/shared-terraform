@@ -22,7 +22,10 @@ them by construction:
      name several functions, all running its one zip: shared-terraform#15),
      both $LATEST and, where the function has the alias `current`, the
      version that alias serves (shared-terraform#19);
-  6. the repo's smoke hook passes.
+  6. the repo's smoke hook passes;
+  7. each function with the alias `current` keeps its newest KEEP_VERSIONS
+     published versions and any an alias names; the older ones are deleted,
+     so versions don't pile up one per apply (shared-terraform#20).
 
 Run it from anywhere inside the service repo:
 
@@ -90,6 +93,10 @@ BOOTSTRAP = "bootstrap"
 # The alias rust-lambda-service (v0.18.0+) serves through: its
 # aws_lambda_alias.current, output as lambda_alias_name (shared-terraform#9).
 SERVING_ALIAS = "current"
+# Published versions a function keeps, newest first, besides any an alias
+# names: enough to move the alias back a few deploys. Each apply publishes
+# one, and the account's code storage is capped (shared-terraform#20).
+KEEP_VERSIONS = 5
 
 
 class Refusal(Exception):
@@ -475,8 +482,10 @@ def check_config(label, cfg, bin_name, built, sha):
 
 def check_deployed(infra, t, zips, sha, env):
     """Every function each bin names runs that bin's zip and names this commit:
-    $LATEST, and the version its alias `current` serves when it has one."""
+    $LATEST, and the version its alias `current` serves when it has one.
+    Returns the functions that have that alias."""
     aws = ["aws", "lambda", "--region", t["region"]]
+    aliased = []
     for bin_name, b in t["bins"].items():
         built = b64_sha256(zips[bin_name])
         for output in b["function_outputs"]:
@@ -502,6 +511,8 @@ def check_deployed(infra, t, zips, sha, env):
             check_config(label, cfg, bin_name, built, sha)
             say(f"{fn} runs {bin_name}'s {built} (commit {sha}), "
                 f"served by alias {SERVING_ALIAS} (version {served})")
+            aliased.append(fn)
+    return aliased
 
 
 def serving_version(aws, fn, env):
@@ -517,6 +528,43 @@ def serving_version(aws, fn, env):
         raise Refusal(f"{fn}'s alias {SERVING_ALIAS} serves {version!r}, "
                       "not a published version")
     return version
+
+
+def stale_versions(versions, aliases):
+    """The published versions to delete, oldest first: all but the newest
+    KEEP_VERSIONS and those an alias names (as its version, or in its routing
+    config's weighted second version). $LATEST is not a published version
+    and is never one."""
+    published = sorted(int(v["Version"]) for v in versions if v["Version"].isdigit())
+    named = set()
+    for a in aliases:
+        named.add(a["FunctionVersion"])
+        named.update((a.get("RoutingConfig") or {}).get("AdditionalVersionWeights") or {})
+    return [str(v) for v in published[:-KEEP_VERSIONS] if str(v) not in named]
+
+
+def prune_versions(t, fns, env):
+    """Delete each function's stale versions (shared-terraform#20).
+
+    Only functions with the alias `current` (rust-lambda-service v0.18.0+,
+    which publishes a version per apply), and only once the deploy has passed
+    its checks and smoke hook, so a failed deploy keeps every version to roll
+    back to.
+    """
+    aws = ["aws", "lambda", "--region", t["region"]]
+    for fn in fns:
+        versions = lambda_json(aws + ["list-versions-by-function", "--function-name", fn], env)
+        aliases = lambda_json(aws + ["list-aliases", "--function-name", fn], env)
+        if versions is None or aliases is None:
+            raise Refusal(f"Lambda has no function {fn} to prune")
+        stale = stale_versions(versions["Versions"], aliases["Aliases"])
+        for v in stale:
+            # capture: the CLI prints {"StatusCode": 204} for each one.
+            run(aws + ["delete-function", "--function-name", fn, "--qualifier", v], env=env,
+                capture=True)
+        say(f"{fn}: deleted {len(stale)} old version(s)"
+            + (f" ({', '.join(stale)})" if stale else "")
+            + f"; kept the newest {KEEP_VERSIONS} and any an alias names")
 
 
 def smoke(repo, hook, target, t, infra, sha, env):
@@ -547,9 +595,13 @@ def deploy(repo, target, t, allow_delete):
     with tempfile.TemporaryDirectory(prefix="deploy-lambda-") as work:
         plan_and_apply(repo, infra, t, zips, sha, tf_env, check, repo_env, work,
                        allow_delete)
-    check_deployed(infra, t, zips, sha, env)
+    aliased = check_deployed(infra, t, zips, sha, env)
     smoke(repo, smoke_hook, target, t, infra, sha, env)
     say(f"{sha} is live on {target}")
+    try:
+        prune_versions(t, aliased, env)
+    except Refusal as e:
+        raise Refusal(f"{sha} is live on {target}, but pruning old versions failed: {e}")
 
 
 def parse_args(argv):

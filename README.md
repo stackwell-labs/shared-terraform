@@ -87,7 +87,9 @@ flowchart LR
     --allow-delete 'module.<name>.aws_cloudformation_stack.function_url_invoke_public[0]'
   ```
 - Every apply keeps one more version (a 15 MB zip is 15 MB more of the
-  account's code storage); nothing prunes them yet.
+  account's code storage). `deploy-lambda` prunes them after each deploy
+  (shared-terraform#20, below); a service deployed some other way keeps them
+  all.
 
 **Removing an env var takes two deploys** while anything still invokes
 `$LATEST`: the unqualified URL or ARNs, and the very deploy that bumps to
@@ -332,6 +334,7 @@ flowchart LR
   D --> E[apply that plan]
   E --> F[each function runs<br>its bin's zip and<br>names this commit,<br>$LATEST and its alias]
   F --> G[repo's smoke hook]
+  G --> H[prune old versions]
   P -. no bins .-> D
   E -. no bins .-> G
 ```
@@ -442,6 +445,15 @@ smoke = "web/infra/aws/deploy-web.sh" # may publish, then check (below)
   may also publish what the applied root serves (a site's files to its
   bucket) and then check the live result: it runs only once the guarded
   apply and the function checks passed.
+- **Pruning** (shared-terraform#20) runs last, once the smoke hook passed.
+  rust-lambda-service publishes a version per apply, so for each checked
+  function that has the alias `current` the engine keeps the newest 5
+  published versions, and any version an alias names (its version or its
+  routing config's second one), and deletes the rest, printing each. That
+  leaves the alias 4 deploys to move back to. A failed deploy prunes
+  nothing. A failed delete fails the run, which then says the commit is live
+  anyway. Lambda can't restore a deleted version; its code is this repo at
+  the commit its description names, rebuilt by the same reproducible zip.
 - **`plan_env`** (optional, shared-terraform#12) runs before the build and
   prints `KEY=value` lines, e.g. a provider's API key read from Secrets
   Manager. Only the terraform calls in init, plan, show and apply get them

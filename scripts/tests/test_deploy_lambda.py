@@ -118,10 +118,10 @@ class Fixture:
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(text)
 
-    def run(self, target="live", engine=ENGINE, **env):
+    def run(self, target="live", engine=ENGINE, args=(), **env):
         (self.stub / "scenario.json").write_text(json.dumps(self.scenario))
         (self.stub / "calls.log").unlink(missing_ok=True)
-        return subprocess.run([sys.executable, str(engine), target], cwd=self.repo,
+        return subprocess.run([sys.executable, str(engine), target, *args], cwd=self.repo,
                               env=dict(self.env, **env), capture_output=True, text=True)
 
     def calls(self, tool=None):
@@ -208,6 +208,20 @@ class DeployLambdaTest(unittest.TestCase):
         self.assertEqual(out.returncode, 0, out.stderr)
         self.assertTrue(self.f.applied())
 
+    def test_allow_delete_applies_the_named_deletes(self):
+        # rust-lambda-service's unqualified_function_url = false
+        # (shared-terraform#18): three plain deletes, each named for this run.
+        retired = ["module.svc.aws_lambda_function_url.this[0]",
+                   "module.svc.aws_lambda_permission.function_url_public[0]",
+                   "module.svc.aws_cloudformation_stack.function_url_invoke_public[0]"]
+        self.f.scenario["changes"] = ([change(a, "delete") for a in retired]
+                                      + [change("aws_lambda_function.svc", "update")])
+        out = self.f.run(args=[x for a in retired for x in ("--allow-delete", a)])
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+        self.assertTrue(self.f.applied())
+        for a in retired:
+            self.assertIn(f"the plan deletes {a}, as --allow-delete allows", out.stdout)
+
     # --- each refusal -----------------------------------------------------
 
     def test_refuses_wrong_account(self):
@@ -240,6 +254,36 @@ class DeployLambdaTest(unittest.TestCase):
         self.f.scenario["changes"] = [change("aws_lambda_permission.allowed", "delete")]
         self.assertRefused(self.f.run(), "aws_lambda_permission.allowed (delete)")
         self.assertFalse(self.f.applied())
+
+    def test_allow_delete_does_not_allow_another_delete(self):
+        self.f.scenario["changes"] = [change("aws_lambda_function_url.this[0]", "delete"),
+                                      change("aws_dynamodb_table.data", "delete")]
+        out = self.f.run(args=["--allow-delete", "aws_lambda_function_url.this[0]"])
+        self.assertRefused(out, "aws_dynamodb_table.data (delete)")
+        self.assertNotIn("aws_lambda_function_url.this[0] (delete)", out.stderr)
+        self.assertFalse(self.f.applied())
+
+    def test_allow_delete_does_not_allow_a_replace(self):
+        self.f.scenario["changes"] = [change("aws_s3_bucket.b", "create", "delete")]
+        out = self.f.run(args=["--allow-delete", "aws_s3_bucket.b"])
+        self.assertRefused(out, "aws_s3_bucket.b (create+delete)")
+        self.assertIn("aws_s3_bucket.b (named by --allow-delete, but the plan does not "
+                      "delete it)", out.stderr)
+        self.assertFalse(self.f.applied())
+
+    def test_allow_delete_the_plan_does_not_make_refuses(self):
+        # A typo, or the step already taken: refused, not silently unused.
+        self.f.scenario["changes"] = [change("aws_lambda_function.svc", "update")]
+        out = self.f.run(args=["--allow-delete", "aws_lambda_function_url.thsi[0]"])
+        self.assertRefused(out, "aws_lambda_function_url.thsi[0] (named by --allow-delete, "
+                                "but the plan does not delete it)")
+        self.assertFalse(self.f.applied())
+
+    def test_allow_delete_needs_an_address(self):
+        out = self.f.run(args=["--allow-delete", ""])
+        self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
+        self.assertIn("--allow-delete needs a resource address", out.stderr)
+        self.assertEqual(self.f.calls(), [])
 
     def test_refuses_code_not_the_built_zip(self):
         self.f.scenario["override"] = {"fn-tick": {"CodeSha256": "stale"}}
@@ -336,6 +380,12 @@ class TerraformOnlyTest(unittest.TestCase):
         self.f.scenario["changes"] = [change("aws_cloudfront_distribution.site", "delete")]
         self.assertRefused(self.f.run("web"), "aws_cloudfront_distribution.site (delete)")
         self.assertFalse(self.f.applied())
+
+    def test_allow_delete_applies(self):
+        self.f.scenario["changes"] = [change("aws_cloudfront_distribution.site", "delete")]
+        out = self.f.run("web", args=["--allow-delete", "aws_cloudfront_distribution.site"])
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+        self.assertTrue(self.f.applied())
 
     def test_keeps_the_account_and_tree_checks(self):
         self.f.scenario["account"] = "999999999999"
@@ -705,7 +755,7 @@ class PinTest(unittest.TestCase):
         # `<(git show ...)`, can't deploy; only the pinned commit's copy can.
         launcher = self.tmp / "launcher.py"
         source = ENGINE.read_text()
-        head = "def deploy(repo, target, t):\n"
+        head = "def deploy(repo, target, t, allow_delete):\n"
         self.assertIn(head, source)
         launcher.write_text(source.replace(
             head, head + "    raise Refusal('the invoked copy deployed')\n"))
@@ -730,6 +780,15 @@ class PinTest(unittest.TestCase):
         self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
         self.assertIn(f"engine pinned at shared-terraform {old}", out.stdout)
         self.assertIn("old engine ran ['live']", out.stdout)
+
+    def test_hands_off_allow_delete(self):
+        (self.st / "scripts/deploy-lambda").write_text(
+            "import sys\nprint('pinned engine ran', sys.argv[1:])\n")
+        pinned = commit_all(self.st)
+        f = self.fixture(pinned)
+        out = f.run(engine=ENGINE, args=["--allow-delete", "a.b[0]"])
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+        self.assertIn("pinned engine ran ['live', '--allow-delete', 'a.b[0]']", out.stdout)
 
     def test_refuses_pin_not_on_main(self):
         git(self.st, "commit", "-q", "--allow-empty", "-m", "unlanded")

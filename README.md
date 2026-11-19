@@ -77,7 +77,15 @@ flowchart LR
   on the function does not cover the alias). `lambda_function_arn` and
   `lambda_invoke_arn` still name `$LATEST`.
 - Once no caller uses the old URL, set `unqualified_function_url = false`.
-  That plans three deletes, which deploy-lambda's plan guard refuses.
+  That plans three plain deletes, which deploy-lambda applies only when that
+  run names each one (shared-terraform#18):
+
+  ```sh
+  deploy-lambda live \
+    --allow-delete 'module.<name>.aws_lambda_function_url.this[0]' \
+    --allow-delete 'module.<name>.aws_lambda_permission.function_url_public[0]' \
+    --allow-delete 'module.<name>.aws_cloudformation_stack.function_url_invoke_public[0]'
+  ```
 - Every apply keeps one more version (a 15 MB zip is 15 MB more of the
   account's code storage); nothing prunes them yet.
 
@@ -320,7 +328,7 @@ flowchart LR
   A[account is<br>the target's] --> B[clean tree,<br>HEAD on origin/main]
   B --> P[repo's prebuild;<br>tree still clean]
   P --> C[cargo build,<br>reproducible zips<br>with includes]
-  C --> D[plan: no delete,<br>replace only if allowed;<br>repo's plan_check]
+  C --> D[plan: no delete<br>or replace unless allowed;<br>repo's plan_check]
   D --> E[apply that plan]
   E --> F[each function runs<br>its bin's zip and<br>names this commit,<br>$LATEST and its alias]
   F --> G[repo's smoke hook]
@@ -333,7 +341,7 @@ Run it from anywhere inside the service repo (Python 3.11+, `aws`,
 
 ```sh
 python3 -I <(git -C ~/agent-platform/shared-terraform show \
-  origin/main:scripts/deploy-lambda) live
+  origin/main:scripts/deploy-lambda) live [--allow-delete <address>]...
 ```
 
 ```toml
@@ -416,7 +424,14 @@ smoke = "web/infra/aws/deploy-web.sh" # may publish, then check (below)
   one root per target, so a service with two roots has two targets, deployed
   in turn (`deploy-lambda live`, then `deploy-lambda web`).
 - **The plan guard** refuses any `delete`; a replace (delete and create) only
-  of an address in `allow_replace`. A plain delete is refused even then.
+  of an address in `allow_replace`. A plain delete is refused even then, unless
+  this run names its address with `--allow-delete` (shared-terraform#18). That
+  is a one-shot flag, not manifest config: a migration step's deletes (retiring
+  rust-lambda-service's unqualified URL, say) are allowed for the run that
+  takes the step, never as a standing allowance. Each named address must be a
+  plain delete in the plan, or the run is refused, so a typo or a step already
+  taken can't pass as allowing nothing. The engine prints each delete it lets
+  through. The flag needs an `engine` pin at or after the commit that added it.
 - **Hooks** are executable files, relative to the repo root, run from it with
   `AWS_PROFILE`, `DEPLOY_TARGET`, `DEPLOY_COMMIT`, `DEPLOY_INFRA` (the root's
   absolute path, for `terraform -chdir="$DEPLOY_INFRA" output`) and

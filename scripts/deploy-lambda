@@ -15,8 +15,9 @@ them by construction:
      (shared-terraform#13);
   4. terraform plans (with the repo's plan_env hook's variables, if any), the
      plan deletes nothing (a replace only of an address listed in
-     allow_replace), the repo's plan_check hook (if any) accepts it, and
-     exactly that plan is applied;
+     allow_replace, a plain delete only of an address this run names with
+     --allow-delete: shared-terraform#18), the repo's plan_check hook (if any)
+     accepts it, and exactly that plan is applied;
   5. each function runs the zip built here and names this commit (a bin may
      name several functions, all running its one zip: shared-terraform#15),
      both $LATEST and, where the function has the alias `current`, the
@@ -26,7 +27,7 @@ them by construction:
 Run it from anywhere inside the service repo:
 
   python3 -I <(git -C ~/agent-platform/shared-terraform show \
-    origin/main:scripts/deploy-lambda) <target>
+    origin/main:scripts/deploy-lambda) <target> [--allow-delete <address>]...
 
 The manifest pins the engine: `engine` is a shared-terraform commit on
 origin/main. Whatever copy is invoked hands off to the pinned commit's copy,
@@ -39,6 +40,7 @@ Python stdlib only (3.11+, for tomllib), so the pinned copy runs straight out
 of `git show` with no build step.
 """
 
+import argparse
 import base64
 import hashlib
 import json
@@ -394,20 +396,34 @@ def build(repo, target, t, env):
     return zips
 
 
-def refused_changes(plan, allow_replace):
-    """Addresses the plan would delete, other than allowed replaces."""
+def refused_changes(plan, allow_replace, allow_delete):
+    """What the plan guard refuses: each delete other than an allowed replace
+    or an allowed plain delete, and each allowed delete the plan doesn't make.
+
+    allow_delete is one run's --allow-delete addresses (shared-terraform#18):
+    a migration step's deletes, named when it is taken, never a standing
+    allowance. Each must be a plain delete in this plan, so a typo or a step
+    already taken refuses rather than allowing nothing.
+    """
     refused = []
+    deleted = set()
     for rc in plan.get("resource_changes") or []:
         actions = rc["change"]["actions"]
         if "delete" not in actions:
             continue
+        if actions == ["delete"] and rc["address"] in allow_delete:
+            deleted.add(rc["address"])
+            continue
         if "create" in actions and rc["address"] in allow_replace:
             continue
         refused.append(f"{rc['address']} ({'+'.join(actions)})")
+    refused += [f"{a} (named by --allow-delete, but the plan does not delete it)"
+                for a in sorted(set(allow_delete) - deleted)]
     return refused
 
 
-def plan_and_apply(repo, infra, t, zips, sha, tf_env, check, check_env, work):
+def plan_and_apply(repo, infra, t, zips, sha, tf_env, check, check_env, work,
+                   allow_delete):
     """tf_env is the deploy's env plus plan_env's variables: only terraform sees it."""
     tf = ["terraform", f"-chdir={infra}"]
     run(tf + ["init", "-input=false", "-backend-config=backend.hcl"], env=tf_env)
@@ -419,10 +435,11 @@ def plan_and_apply(repo, infra, t, zips, sha, tf_env, check, check_env, work):
         cmd.append(f"-var={b['zip_var']}={zips[bin_name]}")
     run(cmd, env=tf_env)
     plan_json = run(tf + ["show", "-json", plan_file], env=tf_env, capture=True)
-    refused = refused_changes(json.loads(plan_json), t["allow_replace"])
+    refused = refused_changes(json.loads(plan_json), t["allow_replace"], allow_delete)
     if refused:
-        raise Refusal("the plan deletes or replaces resources; not applying:\n  "
-                      + "\n  ".join(refused))
+        raise Refusal("the plan guard refuses; not applying:\n  " + "\n  ".join(refused))
+    for a in sorted(set(allow_delete)):
+        say(f"the plan deletes {a}, as --allow-delete allows")
     if check is not None:
         code = subprocess.run([str(check)], cwd=repo, env=check_env, input=plan_json,
                               text=True).returncode
@@ -506,7 +523,7 @@ def smoke(repo, hook, target, t, infra, sha, env):
     run([str(hook)], cwd=repo, env=hook_env(env, target, t, infra, sha))
 
 
-def deploy(repo, target, t):
+def deploy(repo, target, t, allow_delete):
     env = dict(os.environ, AWS_PROFILE=t["profile"])
     infra = (repo / t["infra"]).resolve()
     env_hook = hook_path(repo, t, "plan_env")
@@ -528,23 +545,34 @@ def deploy(repo, target, t):
         say(f"{target} has no bins: Terraform only, nothing to build")
         zips = {}
     with tempfile.TemporaryDirectory(prefix="deploy-lambda-") as work:
-        plan_and_apply(repo, infra, t, zips, sha, tf_env, check, repo_env, work)
+        plan_and_apply(repo, infra, t, zips, sha, tf_env, check, repo_env, work,
+                       allow_delete)
     check_deployed(infra, t, zips, sha, env)
     smoke(repo, smoke_hook, target, t, infra, sha, env)
     say(f"{sha} is live on {target}")
 
 
+def parse_args(argv):
+    p = argparse.ArgumentParser(prog="deploy-lambda")
+    p.add_argument("target", help="a table in .amber/deploy.toml")
+    p.add_argument("--allow-delete", metavar="ADDRESS", action="append", default=[],
+                   help="let this run's plan delete ADDRESS (a resource address, "
+                        "e.g. 'module.svc.aws_lambda_function_url.this[0]'), which "
+                        "it must; repeat for each")
+    args = p.parse_args(argv)
+    if not all(args.allow_delete):
+        p.error("--allow-delete needs a resource address")
+    return args
+
+
 def main(argv):
-    if len(argv) != 1 or argv[0].startswith("-"):
-        print("usage: deploy-lambda <target>   (a table in .amber/deploy.toml)", file=sys.stderr)
-        return 2
-    target = argv[0]
+    args = parse_args(argv)
     try:
         repo = Path(run(["git", "rev-parse", "--show-toplevel"], capture=True).strip())
         doc, engine = load_manifest(repo)
         if os.environ.get(PINNED_ENV) != engine:
             return hand_off(repo, engine, argv)
-        deploy(repo, target, target_of(doc, target))
+        deploy(repo, args.target, target_of(doc, args.target), args.allow_delete)
         return 0
     except Refusal as e:
         print(f"deploy-lambda: refusing: {e}", file=sys.stderr)

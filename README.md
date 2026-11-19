@@ -334,7 +334,8 @@ flowchart LR
   D --> E[apply that plan]
   E --> F[each function runs<br>its bin's zip and<br>names this commit,<br>$LATEST and its alias]
   F --> G[repo's smoke hook]
-  G --> H[prune old versions]
+  G --> Q[probe event, if<br>the target names one]
+  Q --> H[prune old versions]
   P -. no bins .-> D
   E -. no bins .-> G
 ```
@@ -363,6 +364,7 @@ smoke = "scripts/smoke-deploy.sh"     # required, run after the checks
 plan_env = "scripts/plan-env.sh"      # optional: KEY=value lines for terraform
 plan_check = "scripts/plan-check.sh"  # optional: plan JSON on stdin; non-zero refuses
 prebuild = "scripts/prebuild.sh"      # optional: run before cargo build (an SPA's bundle)
+probe = "<service>"                   # optional: its probe event once live (probes table)
 
 [live.bins.compute-gateway-service]   # a cargo bin, zipped as `bootstrap`
 zip_var = "lambda_zip_path"           # the root's variable for its zip path
@@ -445,6 +447,19 @@ smoke = "web/infra/aws/deploy-web.sh" # may publish, then check (below)
   may also publish what the applied root serves (a site's files to its
   bucket) and then check the live result: it runs only once the guarded
   apply and the function checks passed.
+- **The probe event** (shared-terraform#21) goes out once the smoke hook
+  passed, for a target that names `probe`: one event on the probes
+  account's `probes-deploys` bus (source `stackwell.deploy`, `DetailType` the
+  probe, detail `{"commit": "<sha>"}`), put with the target's profile, so
+  that service's probe mission runs within minutes (probes README, "A probe
+  run after each deploy (probes#20)"). The bus admits each service's account
+  for its own `DetailType` only, so `probe` names the service the probes
+  table lists for the target's account. The engine prints the event id. A
+  put the bus doesn't take (a non-zero `FailedEntryCount`, or the call
+  failing) fails the run, which says the commit is live anyway and skips
+  pruning: a deploy that quietly started no probe would lose the outside
+  check unseen. The field needs an `engine` pin at or after the commit that
+  added it.
 - **Pruning** (shared-terraform#20) runs last, once the smoke hook passed.
   rust-lambda-service publishes a version per apply, so for each checked
   function that has the alias `current` the engine keeps the newest 5

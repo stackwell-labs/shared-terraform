@@ -96,6 +96,15 @@ if tool == "aws":
         p = state / "deleted.json"
         gone = json.loads(p.read_text()) if p.exists() else []
         p.write_text(json.dumps(gone + [[fn, version]]))
+    elif args[:2] == ["events", "put-events"]:
+        # The probes-deploys bus (shared-terraform#21): it takes the event
+        # unless the scenario says how it answers instead.
+        if "put_events_exit" in scenario:
+            print("An error occurred (AccessDeniedException) when calling the "
+                  "PutEvents operation", file=sys.stderr)
+            sys.exit(scenario["put_events_exit"])
+        print(json.dumps(scenario.get("put_events",
+                                      {"FailedEntryCount": 0, "Entries": [{"EventId": "evt-1"}]})))
     else:
         sys.exit(f"stub aws: unexpected {args}")
 

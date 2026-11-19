@@ -393,6 +393,69 @@ class DeployLambdaTest(unittest.TestCase):
                            "--function-name fn-service --qualifier 2` exited 254")
         self.assertTrue((self.f.stub / "smoke-env").exists())
 
+    # --- the probe event (shared-terraform#21) ----------------------------
+
+    def probe(self, name="svc"):
+        """Name the live target's probe and land it."""
+        self.f.write(".amber/deploy.toml", MANIFEST.format(engine=PIN).replace(
+            "smoke = ", f'probe = "{name}"\nsmoke = '))
+        self.f.sha = commit_all(self.f.repo)
+
+    def puts(self):
+        return [c for c in self.f.calls("aws") if c["args"][:2] == ["events", "put-events"]]
+
+    def test_puts_the_probe_event_once_live(self):
+        self.probe()
+        out = self.f.run()
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+        (put,) = self.puts()
+        self.assertEqual(put["profile"], "svc")
+        self.assertEqual(put["args"][put["args"].index("--region") + 1], "us-east-1")
+        (entry,) = json.loads(put["args"][put["args"].index("--entries") + 1])
+        self.assertEqual(entry, {
+            "EventBusName": "arn:aws:events:us-east-1:774098479672:event-bus/probes-deploys",
+            "Source": "stackwell.deploy", "DetailType": "svc",
+            "Detail": json.dumps({"commit": self.f.sha})})
+        self.assertIn(f"put the 'svc' probe event for {self.f.sha} on probes-deploys "
+                      "(event evt-1)", out.stdout)
+        # Only once the deploy is live, and before pruning.
+        self.assertLess(out.stdout.index("is live on live"), out.stdout.index("probe event"))
+        self.assertLess(out.stdout.index("probe event"), out.stdout.index("fn-service: deleted"))
+
+    def test_no_probe_no_event(self):
+        self.assertEqual(self.f.run().returncode, 0)
+        self.assertEqual(self.puts(), [])
+
+    def test_no_event_when_smoke_fails(self):
+        self.probe()
+        self.assertEqual(self.f.run(SMOKE_EXIT="1").returncode, 1)
+        self.assertEqual(self.puts(), [])
+
+    def test_no_event_when_the_checks_refuse(self):
+        self.probe()
+        self.f.scenario["override"] = {"fn-service": {"Description": "commit old"}}
+        self.assertRefused(self.f.run(), "fn-service's description is 'commit old'")
+        self.assertEqual(self.puts(), [])
+
+    def test_event_the_bus_refuses_fails_the_deploy_after_it_is_live(self):
+        self.probe()
+        self.f.scenario["put_events"] = {"FailedEntryCount": 1, "Entries": [
+            {"ErrorCode": "NotAuthorizedForSourceException", "ErrorMessage": "no"}]}
+        out = self.f.run()
+        self.assertRefused(out, f"{self.f.sha} is live on live, but its probe event failed "
+                           "(no probe run; old versions not pruned): probes-deploys did not "
+                           "take the 'svc' event")
+        self.assertIn("NotAuthorizedForSourceException", out.stderr)
+        self.assertEqual(self.deleted(), [])
+
+    def test_failed_put_call_fails_the_deploy_after_it_is_live(self):
+        self.probe()
+        self.f.scenario["put_events_exit"] = 254
+        out = self.f.run()
+        self.assertRefused(out, f"{self.f.sha} is live on live, but its probe event failed")
+        self.assertIn("put-events", out.stderr)
+        self.assertIn("exited 254", out.stderr)
+
     def test_refuses_alias_on_latest(self):
         self.f.scenario["functions"]["fn-service"]["alias"] = "$LATEST"
         self.assertRefused(self.f.run(), "fn-service's alias current serves '$LATEST', "
@@ -827,6 +890,11 @@ class ManifestTest(unittest.TestCase):
 
     def test_include_must_be_a_table(self):
         self.refuse(self.include('"web"'), "include must be a non-empty dict")
+
+    def test_probe_must_name_a_service(self):
+        for value in ('""', "3"):
+            self.refuse(self.base().replace("smoke = ", f"probe = {value}\nsmoke = "),
+                        "probe must be a non-empty str")
 
     def test_bad_engine(self):
         self.refuse(self.base().replace(PIN, "main"), "engine must be a 40-hex")

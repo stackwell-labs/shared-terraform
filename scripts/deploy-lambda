@@ -23,7 +23,10 @@ them by construction:
      both $LATEST and, where the function has the alias `current`, the
      version that alias serves (shared-terraform#19);
   6. the repo's smoke hook passes;
-  7. each function with the alias `current` keeps its newest KEEP_VERSIONS
+  7. a target that names its probe puts one event on the probes account's
+     probes-deploys bus, so that service's probe mission runs within minutes
+     (shared-terraform#21, probes#20);
+  8. each function with the alias `current` keeps its newest KEEP_VERSIONS
      published versions and any an alias names; the older ones are deleted,
      so versions don't pile up one per apply (shared-terraform#20).
 
@@ -81,9 +84,10 @@ TARGET_FIELDS = {
     "plan_env": str,
     "plan_check": str,
     "prebuild": str,
+    "probe": str,
 }
 OPTIONAL_TARGET_FIELDS = {"var_file", "allow_replace", "plan_env", "plan_check",
-                          "prebuild", "cargo_manifest", "bins"}
+                          "prebuild", "cargo_manifest", "bins", "probe"}
 BIN_FIELDS = {"zip_var": str, "function_outputs": list, "include": dict}
 OPTIONAL_BIN_FIELDS = {"include"}
 # A zip entry's timestamp: the earliest a zip can hold, so the zip's bytes
@@ -97,6 +101,11 @@ SERVING_ALIAS = "current"
 # names: enough to move the alias back a few deploys. Each apply publishes
 # one, and the account's code storage is capped (shared-terraform#20).
 KEEP_VERSIONS = 5
+# The probes account's bus a live deploy puts its event on (probes#20, probes
+# infra/deploy.tf). Its policy lets each service's account put only its own
+# DetailType (the target's `probe`), with this source.
+PROBES_BUS = "arn:aws:events:us-east-1:774098479672:event-bus/probes-deploys"
+PROBES_SOURCE = "stackwell.deploy"
 
 
 class Refusal(Exception):
@@ -567,6 +576,25 @@ def prune_versions(t, fns, env):
             + f"; kept the newest {KEEP_VERSIONS} and any an alias names")
 
 
+def put_probe_event(t, sha, env):
+    """Put the deploy's event on the probes-deploys bus, so the probe service
+    t names runs its mission against this commit (shared-terraform#21).
+
+    With the target's own profile: the bus admits each service's account for
+    its own DetailType only. A put the bus doesn't take refuses."""
+    entry = {"EventBusName": PROBES_BUS, "Source": PROBES_SOURCE,
+             "DetailType": t["probe"], "Detail": json.dumps({"commit": sha})}
+    region = PROBES_BUS.split(":")[3]
+    out = json.loads(run(["aws", "events", "put-events", "--region", region,
+                          "--entries", json.dumps([entry]), "--output", "json"],
+                         env=env, capture=True))
+    entries = out.get("Entries") or []
+    if out.get("FailedEntryCount") != 0 or len(entries) != 1 or not entries[0].get("EventId"):
+        raise Refusal(f"probes-deploys did not take the {t['probe']!r} event: {json.dumps(out)}")
+    say(f"put the {t['probe']!r} probe event for {sha} on probes-deploys "
+        f"(event {entries[0]['EventId']})")
+
+
 def smoke(repo, hook, target, t, infra, sha, env):
     run([str(hook)], cwd=repo, env=hook_env(env, target, t, infra, sha))
 
@@ -598,6 +626,12 @@ def deploy(repo, target, t, allow_delete):
     aliased = check_deployed(infra, t, zips, sha, env)
     smoke(repo, smoke_hook, target, t, infra, sha, env)
     say(f"{sha} is live on {target}")
+    if "probe" in t:
+        try:
+            put_probe_event(t, sha, env)
+        except Refusal as e:
+            raise Refusal(f"{sha} is live on {target}, but its probe event failed "
+                          f"(no probe run; old versions not pruned): {e}")
     try:
         prune_versions(t, aliased, env)
     except Refusal as e:

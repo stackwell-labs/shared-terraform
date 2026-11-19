@@ -322,7 +322,7 @@ flowchart LR
   P --> C[cargo build,<br>reproducible zips<br>with includes]
   C --> D[plan: no delete,<br>replace only if allowed;<br>repo's plan_check]
   D --> E[apply that plan]
-  E --> F[each function runs<br>its bin's zip and<br>names this commit]
+  E --> F[each function runs<br>its bin's zip and<br>names this commit,<br>$LATEST and its alias]
   F --> G[repo's smoke hook]
   P -. no bins .-> D
   E -. no bins .-> G
@@ -378,7 +378,12 @@ smoke = "web/infra/aws/deploy-web.sh" # may publish, then check (below)
   its `function_outputs`.
 - **`function_outputs`** (shared-terraform#15) lists the root's outputs naming
   each function that runs the bin's zip; the engine checks every one runs that
-  zip and is described `commit <sha>`. One binary on two functions (an API and
+  zip and is described `commit <sha>`: `$LATEST`, and, when the function has
+  the alias `current` (rust-lambda-service v0.18.0+), the version that alias
+  serves, which is what callers reach (shared-terraform#19). A function
+  without that alias (one not on the module) is checked on `$LATEST`, which
+  is then what serves; any error from Lambda other than "no such alias"
+  refuses, as does an alias on `$LATEST`. One binary on two functions (an API and
   a worker that picks its entrypoint from an env var) lists both, so the
   second needs no second cargo bin. An output listed twice in a target is
   refused: one function runs one zip. It replaces `function_output` (one

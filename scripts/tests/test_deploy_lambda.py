@@ -60,11 +60,16 @@ exit "${SMOKE_EXIT:-0}"
 """
 
 FUNCTIONS = {
-    "fn-service": {"output": "lambda_function_name", "zip_var": "lambda_zip_path"},
+    # On rust-lambda-service >= v0.18.0: the alias `current` serves version 7
+    # (shared-terraform#19).
+    "fn-service": {"output": "lambda_function_name", "zip_var": "lambda_zip_path",
+                   "alias": "7"},
+    # A function not on the module: no alias, so $LATEST serves.
     "fn-tick": {"output": "tick_function_name", "zip_var": "tick_zip_path"},
     # A second function running svc-service's zip (social-graph's erasure
     # filer, shared-terraform#15).
-    "fn-filer": {"output": "filer_function_name", "zip_var": "lambda_zip_path"},
+    "fn-filer": {"output": "filer_function_name", "zip_var": "lambda_zip_path",
+                 "alias": "3"},
 }
 
 
@@ -108,7 +113,8 @@ class Fixture:
         self.write("infra/aws/backend.hcl", "")
         self.write("Cargo.toml", "")
         self.sha = commit_all(self.repo)
-        self.scenario = {"account": ACCOUNT, "functions": FUNCTIONS}
+        # A copy: a test may change its functions without touching the next test's.
+        self.scenario = {"account": ACCOUNT, "functions": json.loads(json.dumps(FUNCTIONS))}
         self.env = dict(os.environ, PATH=f"{self.bin}{os.pathsep}{os.environ['PATH']}",
                         STUB_DIR=str(self.stub), DEPLOY_LAMBDA_PINNED=engine)
         self.env.pop("CARGO_TARGET_DIR", None)
@@ -250,9 +256,47 @@ class DeployLambdaTest(unittest.TestCase):
         out = self.f.run()
         self.assertEqual(out.returncode, 0, out.stderr)
         checked = [c["args"][c["args"].index("--function-name") + 1]
-                   for c in self.f.calls("aws") if "get-function-configuration" in c["args"]]
+                   for c in self.f.calls("aws")
+                   if "get-function-configuration" in c["args"] and "--qualifier" not in c["args"]]
         self.assertEqual(checked, ["fn-service", "fn-filer", "fn-tick"])
         self.assertIn("fn-filer runs svc-service's", out.stdout)
+
+    def test_checks_the_version_the_alias_serves(self):
+        out = self.f.run()
+        self.assertEqual(out.returncode, 0, out.stderr)
+        read = [(c["args"][c["args"].index("--function-name") + 1],
+                 c["args"][c["args"].index("--qualifier") + 1] if "--qualifier" in c["args"]
+                 else None)
+                for c in self.f.calls("aws") if "get-function-configuration" in c["args"]]
+        self.assertEqual(read, [("fn-service", None), ("fn-service", "7"),
+                                ("fn-filer", None), ("fn-filer", "3"), ("fn-tick", None)])
+        self.assertIn("served by alias current (version 7)", out.stdout)
+        self.assertIn("fn-tick runs svc-tick's", out.stdout)
+        self.assertIn("no alias current, so $LATEST serves", out.stdout)
+
+    def test_refuses_alias_serving_another_zip(self):
+        # $LATEST runs the new zip, but the alias still serves the previous
+        # version: an alias update that failed or was skipped.
+        self.f.scenario["version_override"] = {"fn-service": {"CodeSha256": "previous"}}
+        self.assertRefused(self.f.run(), "fn-service's alias current (version 7) runs code "
+                           "previous, not svc-service's built zip")
+        self.assertFalse((self.f.stub / "smoke-env").exists())
+
+    def test_refuses_alias_version_not_this_commit(self):
+        self.f.scenario["version_override"] = {"fn-filer": {"Description": "commit old"}}
+        self.assertRefused(self.f.run(), "fn-filer's alias current (version 3)'s description "
+                           "is 'commit old'")
+
+    def test_refuses_alias_on_latest(self):
+        self.f.scenario["functions"]["fn-service"]["alias"] = "$LATEST"
+        self.assertRefused(self.f.run(), "fn-service's alias current serves '$LATEST', "
+                           "not a published version")
+
+    def test_alias_lookup_failure_refuses(self):
+        # Only "no such alias" means $LATEST serves; any other error refuses.
+        self.f.scenario["alias_error"] = {"fn-tick": "An error occurred (AccessDeniedException)"}
+        self.assertRefused(self.f.run(), "get-alias --function-name fn-tick")
+        self.assertIn("AccessDeniedException", self.f.run().stderr)
 
     def test_refuses_second_function_running_another_zip(self):
         self.f.scenario["override"] = {"fn-filer": {"CodeSha256": "other"}}

@@ -38,11 +38,34 @@ if tool == "aws":
         print(scenario["account"])
     elif "wait" in args:
         pass
+    elif "get-alias" in args:
+        # A function on rust-lambda-service >= v0.18.0 has the alias
+        # `current` on the version each apply publishes (shared-terraform#19).
+        fn = args[args.index("--function-name") + 1]
+        f = scenario["functions"][fn]
+        if fn in scenario.get("alias_error", {}):
+            sys.exit(scenario["alias_error"][fn])
+        if not f.get("alias") or args[args.index("--name") + 1] != "current":
+            print("An error occurred (ResourceNotFoundException) when calling the "
+                  f"GetAlias operation: Alias not found: {fn}:current", file=sys.stderr)
+            sys.exit(254)
+        print(json.dumps({"Name": "current", "FunctionVersion": f["alias"]}))
     elif "get-function-configuration" in args:
         fn = args[args.index("--function-name") + 1]
-        zip_var = scenario["functions"][fn]["zip_var"]
-        cfg = dict(deployed()[zip_var])
-        cfg.update(scenario.get("override", {}).get(fn, {}))
+        f = scenario["functions"][fn]
+        cfg = dict(deployed()[f["zip_var"]])
+        if "--qualifier" in args:
+            # The alias's version: published by the apply, so it runs what
+            # $LATEST ran then, unless the scenario says the alias serves
+            # another one.
+            if args[args.index("--qualifier") + 1] != f.get("alias"):
+                print("An error occurred (ResourceNotFoundException) when calling the "
+                      "GetFunctionConfiguration operation: Function not found",
+                      file=sys.stderr)
+                sys.exit(254)
+            cfg.update(scenario.get("version_override", {}).get(fn, {}))
+        else:
+            cfg.update(scenario.get("override", {}).get(fn, {}))
         print(json.dumps(cfg))
     else:
         sys.exit(f"stub aws: unexpected {args}")

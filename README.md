@@ -454,9 +454,16 @@ smoke = "web/infra/aws/deploy-web.sh" # may publish, then check (below)
   gate on `main` can't answer. Without it ChirpAuth, whose outage that is,
   could only roll back, never ship its own fix (decision-profile P5). Every
   other step stays, the clean tree included, and the engine prints a
-  `BREAK-GLASS` line naming the commit. Land that commit on `main` as soon as
-  the gate can take it (amber-git-service `docs/break-glass.md`, §2). The
-  flag needs an `engine` pin at or after the commit that added it.
+  `BREAK-GLASS` line naming the commit. It also sets
+  `DEVBOX_TERRAFORM_BREAK_GLASS` to that commit for terraform alone (not the
+  hooks), so the box's `terraform` wrapper, which makes the same origin/main
+  check on `apply`, lets it through (devbox#212, shared-terraform#24); nobody
+  exports anything by hand. Without the flag the engine strips an inherited
+  export, and `plan_env` may not set any `DEVBOX_TERRAFORM_*`. Land that
+  commit on `main` as soon as the gate can take it (amber-git-service
+  `docs/break-glass.md`, §2). The flag needs an `engine` pin at or after the
+  commit that added it; letting the wrapper through needs one at or after
+  shared-terraform#24's.
 - **Hooks** are executable files, relative to the repo root, run from it with
   `AWS_PROFILE`, `DEPLOY_TARGET`, `DEPLOY_COMMIT`, `DEPLOY_INFRA` (the root's
   absolute path, for `terraform -chdir="$DEPLOY_INFRA" output`) and
@@ -494,8 +501,9 @@ smoke = "web/infra/aws/deploy-web.sh" # may publish, then check (below)
   Manager. Only the terraform calls in init, plan, show and apply get them
   (not aws, cargo or the other hooks), and the engine prints their names,
   never a value. It refuses a line that isn't `KEY=value` (without showing
-  it), an empty value, a key set twice, and any `AWS_*` or `TF_*` key: those
-  decide the account and what terraform does, which the engine owns.
+  it), an empty value, a key set twice, and any `AWS_*`, `TF_*` or
+  `DEVBOX_TERRAFORM_*` key: those decide the account, what terraform does and
+  whether the box's wrapper lets an apply through, which the engine owns.
 - **`plan_check`** (optional, shared-terraform#12) gets `terraform show -json`
   of the plan on stdin, after the engine's own guard passed. A non-zero exit
   refuses the apply; say why on stderr. A service-specific rule about the

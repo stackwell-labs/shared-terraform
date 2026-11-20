@@ -19,6 +19,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 ENGINE = HERE.parent / "deploy-lambda"
 PIN = "0" * 40
+GLASS = "DEVBOX_TERRAFORM_BREAK_GLASS"
 ACCOUNT = "111122223333"
 
 MANIFEST = f"""\
@@ -55,7 +56,7 @@ smoke = "scripts/smoke.sh"
 
 SMOKE = """\
 #!/usr/bin/env bash
-env | grep -E '^(DEPLOY_|AWS_PROFILE=)' | sort > "$STUB_DIR/smoke-env"
+env | grep -E '^(DEPLOY_|AWS_PROFILE=|DEVBOX_TERRAFORM_)' | sort > "$STUB_DIR/smoke-env"
 exit "${SMOKE_EXIT:-0}"
 """
 
@@ -260,6 +261,46 @@ class DeployLambdaTest(unittest.TestCase):
         self.assertIn(f"{sha} is live on live", out.stdout)
         plan = next(c for c in self.f.calls("terraform") if "plan" in c["args"])
         self.assertIn(f"-var=deploy_commit={sha}", plan["args"])
+
+    def break_glass_env(self):
+        """DEVBOX_TERRAFORM_BREAK_GLASS as the run's tf_env calls (terraform's
+        init, plan, show and apply) saw it, and as every other call did (aws,
+        cargo, the read-only `terraform output`)."""
+        tf_env_cmds = {"init", "plan", "show", "apply"}
+        tf, others = {}, []
+        for c in self.f.calls():
+            cmd = next((a for a in c["args"] if a in tf_env_cmds), None)
+            if c["tool"] == "terraform" and cmd:
+                tf[cmd] = c["env"][GLASS]
+            else:
+                others.append(c["env"][GLASS])
+        self.assertEqual(set(tf), tf_env_cmds)
+        self.assertTrue(others)
+        return set(tf.values()), set(others)
+
+    def test_break_glass_sets_the_wrappers_variable_for_terraform_only(self):
+        # shared-terraform#24: the box's terraform wrapper (devbox#212) lets
+        # the apply through only when this names HEAD.
+        self.f.scenario["log_env"] = [GLASS]
+        self.f.write("fix.txt", "x")
+        sha = commit_all(self.f.repo, push=False)
+        # A stale export, naming another commit, is replaced, not passed on.
+        out = self.f.run(args=["--break-glass"], **{GLASS: PIN})
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+        tf, others = self.break_glass_env()
+        self.assertEqual(tf, {sha})
+        self.assertEqual(others, {None})
+        self.assertNotIn(GLASS, (self.f.stub / "smoke-env").read_text())
+
+    def test_normal_deploy_strips_an_inherited_break_glass(self):
+        self.f.scenario["log_env"] = [GLASS]
+        # Even one naming this very commit: only --break-glass may skip the
+        # wrapper's origin/main check.
+        out = self.f.run(**{GLASS: self.f.sha})
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+        tf, others = self.break_glass_env()
+        self.assertEqual(tf | others, {None})
+        self.assertNotIn(GLASS, (self.f.stub / "smoke-env").read_text())
 
     def test_break_glass_keeps_the_clean_tree_check(self):
         self.f.write("stray.txt", "x")
@@ -658,7 +699,7 @@ class HookTest(unittest.TestCase):
         self.assertEqual(self.f.calls("terraform"), [])
 
     def test_plan_env_may_not_set_engine_variables(self):
-        for name in ("AWS_PROFILE", "TF_CLI_ARGS_apply"):
+        for name in ("AWS_PROFILE", "TF_CLI_ARGS_apply", "DEVBOX_TERRAFORM_BREAK_GLASS"):
             self.hooks(plan_env=f'echo "{name}=x"\n')
             self.assertRefused(self.f.run(), f"plan_env may not set {name}")
             self.assertEqual(self.f.calls("terraform"), [])

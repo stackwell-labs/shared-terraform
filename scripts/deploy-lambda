@@ -9,7 +9,8 @@ them by construction:
   1. the credentials are for the target's account;
   2. the tree is clean and HEAD is on origin/main (--break-glass skips the
      origin/main half, for an outage that stops a fix landing:
-     agent-platform--protocols#106);
+     agent-platform--protocols#106, and tells the box's terraform wrapper
+     to apply HEAD anyway: shared-terraform#24, devbox#212);
   3. the repo's prebuild hook (if any) runs, and the tree is still clean;
      each bin is built (cargo, x86_64 musl) and zipped reproducibly, with
      the files its include names beside bootstrap (shared-terraform#14);
@@ -71,9 +72,14 @@ RUST_TARGET = "x86_64-unknown-linux-musl"
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 ACCOUNT_RE = re.compile(r"^[0-9]{12}$")
 ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+# The box's terraform wrapper (devbox bin/terraform, devbox#212) applies a
+# commit not on origin/main only when this names that commit and it is HEAD.
+# Only --break-glass sets it, and only in terraform's env.
+BREAK_GLASS_ENV = "DEVBOX_TERRAFORM_BREAK_GLASS"
 # plan_env may not set these: they decide which account terraform acts in and
-# what it does, which the engine owns.
-ENGINE_ENV_PREFIXES = ("AWS_", "TF_")
+# what it does, and whether the box's wrapper lets an apply through, which the
+# engine owns.
+ENGINE_ENV_PREFIXES = ("AWS_", "TF_", "DEVBOX_TERRAFORM_")
 TARGET_FIELDS = {
     "account": str,
     "profile": str,
@@ -301,7 +307,7 @@ def plan_env(repo, hook, env):
             raise Refusal(f"plan_env line {n} is not KEY=value (the line is not shown)")
         if name.startswith(ENGINE_ENV_PREFIXES):
             raise Refusal(f"plan_env may not set {name}: the engine owns "
-                          + " and ".join(p + "*" for p in ENGINE_ENV_PREFIXES))
+                          + ", ".join(p + "*" for p in ENGINE_ENV_PREFIXES))
         if name in extra:
             raise Refusal(f"plan_env sets {name} twice")
         if not value:
@@ -610,6 +616,9 @@ def smoke(repo, hook, target, t, infra, sha, env):
 
 def deploy(repo, target, t, allow_delete, break_glass):
     env = dict(os.environ, AWS_PROFILE=t["profile"])
+    # An inherited export never reaches terraform or a hook: a stale one must
+    # not carry a normal deploy past the wrapper's origin/main check.
+    env.pop(BREAK_GLASS_ENV, None)
     infra = (repo / t["infra"]).resolve()
     env_hook = hook_path(repo, t, "plan_env")
     check = hook_path(repo, t, "plan_check")
@@ -619,7 +628,10 @@ def deploy(repo, target, t, allow_delete, break_glass):
     sha = check_tree(repo, break_glass)
     say(f"deploying {sha} to {target} (account {t['account']})")
     repo_env = hook_env(env, target, t, infra, sha)
-    tf_env = dict(env, **plan_env(repo, env_hook, repo_env)) if env_hook else env
+    tf_env = dict(env, **(plan_env(repo, env_hook, repo_env) if env_hook else {}))
+    if break_glass:
+        # The wrapper's own origin/main check would refuse this commit's apply.
+        tf_env[BREAK_GLASS_ENV] = sha
     if prebuild is not None:
         run([str(prebuild)], cwd=repo, env=repo_env)
         # What it writes must be ignored, so what deploys is still this commit.

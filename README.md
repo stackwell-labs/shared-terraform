@@ -356,7 +356,7 @@ Run it from anywhere inside the service repo (Python 3.11+, `aws`,
 
 ```sh
 python3 -I <(git -C ~/agent-platform/shared-terraform show \
-  origin/main:scripts/deploy-lambda) live [--allow-delete <address>]...
+  origin/main:scripts/deploy-lambda) live [--allow-delete <address>]... [--break-glass]
 ```
 
 ```toml
@@ -448,6 +448,15 @@ smoke = "web/infra/aws/deploy-web.sh" # may publish, then check (below)
   plain delete in the plan, or the run is refused, so a typo or a step already
   taken can't pass as allowing nothing. The engine prints each delete it lets
   through. The flag needs an `engine` pin at or after the commit that added it.
+- **`--break-glass`** (agent-platform--protocols#106) deploys HEAD without
+  fetching origin or checking HEAD is on origin/main. It is for an outage that
+  stops a fix landing: amber-git down, or ChirpAuth or amber-ci down so the
+  gate on `main` can't answer. Without it ChirpAuth, whose outage that is,
+  could only roll back, never ship its own fix (decision-profile P5). Every
+  other step stays, the clean tree included, and the engine prints a
+  `BREAK-GLASS` line naming the commit. Land that commit on `main` as soon as
+  the gate can take it (amber-git-service `docs/break-glass.md`, §2). The
+  flag needs an `engine` pin at or after the commit that added it.
 - **Hooks** are executable files, relative to the repo root, run from it with
   `AWS_PROFILE`, `DEPLOY_TARGET`, `DEPLOY_COMMIT`, `DEPLOY_INFRA` (the root's
   absolute path, for `terraform -chdir="$DEPLOY_INFRA" output`) and

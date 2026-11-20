@@ -7,7 +7,9 @@ deploy-live.sh and build-lambda.sh. A repo describes its deploy targets in
 them by construction:
 
   1. the credentials are for the target's account;
-  2. the tree is clean and HEAD is on origin/main;
+  2. the tree is clean and HEAD is on origin/main (--break-glass skips the
+     origin/main half, for an outage that stops a fix landing:
+     agent-platform--protocols#106);
   3. the repo's prebuild hook (if any) runs, and the tree is still clean;
      each bin is built (cargo, x86_64 musl) and zipped reproducibly, with
      the files its include names beside bootstrap (shared-terraform#14);
@@ -34,6 +36,7 @@ Run it from anywhere inside the service repo:
 
   python3 -I <(git -C ~/agent-platform/shared-terraform show \
     origin/main:scripts/deploy-lambda) <target> [--allow-delete <address>]...
+    [--break-glass]
 
 The manifest pins the engine: `engine` is a shared-terraform commit on
 origin/main. Whatever copy is invoked hands off to the pinned commit's copy,
@@ -323,10 +326,16 @@ def check_clean(repo, what="the checkout"):
         raise Refusal(f"{what} has uncommitted or untracked changes")
 
 
-def check_tree(repo):
+def check_tree(repo, break_glass):
     check_clean(repo)
-    run(["git", "fetch", "--quiet", "origin", "main"], cwd=repo)
     sha = run(["git", "rev-parse", "HEAD"], cwd=repo, capture=True).strip()
+    if break_glass:
+        # No fetch either: during an amber-git or ChirpAuth outage it fails.
+        say(f"BREAK-GLASS: not checking that {sha} is on origin/main. Land it on "
+            f"main as soon as the gate can take it (amber-git-service "
+            f"docs/break-glass.md, §2 step 4), and say so on the outage's issue")
+        return sha
+    run(["git", "fetch", "--quiet", "origin", "main"], cwd=repo)
     if subprocess.run(["git", "merge-base", "--is-ancestor", sha, "origin/main"],
                       cwd=repo).returncode != 0:
         raise Refusal(f"{sha} is not on origin/main: land it first")
@@ -599,7 +608,7 @@ def smoke(repo, hook, target, t, infra, sha, env):
     run([str(hook)], cwd=repo, env=hook_env(env, target, t, infra, sha))
 
 
-def deploy(repo, target, t, allow_delete):
+def deploy(repo, target, t, allow_delete, break_glass):
     env = dict(os.environ, AWS_PROFILE=t["profile"])
     infra = (repo / t["infra"]).resolve()
     env_hook = hook_path(repo, t, "plan_env")
@@ -607,7 +616,7 @@ def deploy(repo, target, t, allow_delete):
     prebuild = hook_path(repo, t, "prebuild")
     smoke_hook = hook_path(repo, t, "smoke")
     check_account(t, env)
-    sha = check_tree(repo)
+    sha = check_tree(repo, break_glass)
     say(f"deploying {sha} to {target} (account {t['account']})")
     repo_env = hook_env(env, target, t, infra, sha)
     tf_env = dict(env, **plan_env(repo, env_hook, repo_env)) if env_hook else env
@@ -645,6 +654,11 @@ def parse_args(argv):
                    help="let this run's plan delete ADDRESS (a resource address, "
                         "e.g. 'module.svc.aws_lambda_function_url.this[0]'), which "
                         "it must; repeat for each")
+    p.add_argument("--break-glass", action="store_true",
+                   help="deploy HEAD without checking it is on origin/main, when an "
+                        "outage of amber-git, amber-ci or ChirpAuth stops a fix "
+                        "landing; every other check stays (amber-git-service "
+                        "docs/break-glass.md)")
     args = p.parse_args(argv)
     if not all(args.allow_delete):
         p.error("--allow-delete needs a resource address")
@@ -658,7 +672,8 @@ def main(argv):
         doc, engine = load_manifest(repo)
         if os.environ.get(PINNED_ENV) != engine:
             return hand_off(repo, engine, argv)
-        deploy(repo, args.target, target_of(doc, args.target), args.allow_delete)
+        deploy(repo, args.target, target_of(doc, args.target), args.allow_delete,
+               args.break_glass)
         return 0
     except Refusal as e:
         print(f"deploy-lambda: refusing: {e}", file=sys.stderr)

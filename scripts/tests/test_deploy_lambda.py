@@ -246,6 +246,31 @@ class DeployLambdaTest(unittest.TestCase):
         self.assertRefused(self.f.run(), f"{sha} is not on origin/main")
         self.assertEqual(self.f.calls("cargo"), [])
 
+    # --- --break-glass (agent-platform--protocols#106) ---------------------
+
+    def test_break_glass_deploys_a_commit_not_on_main_with_origin_down(self):
+        self.f.write("fix.txt", "x")
+        sha = commit_all(self.f.repo, push=False)
+        # The outage: origin can't be fetched at all.
+        git(self.f.repo, "remote", "set-url", "origin", str(self.tmp / "gone.git"))
+        self.assertRefused(self.f.run(), "git fetch --quiet origin main")
+        out = self.f.run(args=["--break-glass"])
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+        self.assertIn(f"BREAK-GLASS: not checking that {sha} is on origin/main", out.stdout)
+        self.assertIn(f"{sha} is live on live", out.stdout)
+        plan = next(c for c in self.f.calls("terraform") if "plan" in c["args"])
+        self.assertIn(f"-var=deploy_commit={sha}", plan["args"])
+
+    def test_break_glass_keeps_the_clean_tree_check(self):
+        self.f.write("stray.txt", "x")
+        self.assertRefused(self.f.run(args=["--break-glass"]), "uncommitted or untracked")
+        self.assertEqual(self.f.calls("cargo"), [])
+
+    def test_break_glass_keeps_the_plan_guard(self):
+        self.f.scenario["changes"] = [change("aws_dynamodb_table.data", "delete")]
+        self.assertRefused(self.f.run(args=["--break-glass"]), "aws_dynamodb_table.data")
+        self.assertFalse(self.f.applied())
+
     def test_refuses_delete(self):
         self.f.scenario["changes"] = [change("aws_dynamodb_table.data", "delete")]
         self.assertRefused(self.f.run(), "aws_dynamodb_table.data (delete)")
@@ -929,7 +954,7 @@ class PinTest(unittest.TestCase):
         # `<(git show ...)`, can't deploy; only the pinned commit's copy can.
         launcher = self.tmp / "launcher.py"
         source = ENGINE.read_text()
-        head = "def deploy(repo, target, t, allow_delete):\n"
+        head = "def deploy(repo, target, t, allow_delete, break_glass):\n"
         self.assertIn(head, source)
         launcher.write_text(source.replace(
             head, head + "    raise Refusal('the invoked copy deployed')\n"))
@@ -963,6 +988,15 @@ class PinTest(unittest.TestCase):
         out = f.run(engine=ENGINE, args=["--allow-delete", "a.b[0]"])
         self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
         self.assertIn("pinned engine ran ['live', '--allow-delete', 'a.b[0]']", out.stdout)
+
+    def test_hands_off_break_glass(self):
+        (self.st / "scripts/deploy-lambda").write_text(
+            "import sys\nprint('pinned engine ran', sys.argv[1:])\n")
+        pinned = commit_all(self.st)
+        f = self.fixture(pinned)
+        out = f.run(engine=ENGINE, args=["--break-glass"])
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+        self.assertIn("pinned engine ran ['live', '--break-glass']", out.stdout)
 
     def test_refuses_pin_not_on_main(self):
         git(self.st, "commit", "-q", "--allow-empty", "-m", "unlanded")

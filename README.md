@@ -230,6 +230,9 @@ is unchanged. The pin narrows *which job* gets the token, not what runs inside
 it: the deploy job's own build still runs its dependencies' build scripts,
 unless it uses `prebuilt_artifact_name`.
 
+Its AWS provider constraint is `>= 5.0, < 7.0` (v0.21.0, shared-terraform#23),
+so a root can move to provider 6.x; before v0.21.0 it pinned `~> 5.0`.
+
 Outputs: `role_arn`, `role_name`, `oidc_provider_arn`.
 
 ### `alarms-to-shriek`

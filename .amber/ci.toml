@@ -13,10 +13,6 @@
 #              rust image is only for its git and python3 (3.11, for tomllib),
 #              the same image drive pins.
 #
-# fmt is advisory (a failure reports neutral) because main fails it today:
-# modules/fargate-service/versions.tf has one misaligned `=`
-# (`terraform fmt` fixes it). Make it required once main passes.
-#
 # Terraform 1.10.5, terraform-deploy.yml's default. The modules' tests use
 # mock_provider, which needs >= 1.7, so these checks do not prove that the
 # modules still work on a caller that pins an older terraform_version.
@@ -46,7 +42,7 @@ TF_PLUGIN_CACHE_DIR = "/cache/plugins"
 [job.fmt]
 image = "docker.io/hashicorp/terraform:1.10.5@sha256:679ac5e095bf550bc726742cd12efa6050f0913080df479fdabfeb202953af28"
 run = ["terraform fmt -check -recursive -diff"]
-required_for_main = false
+required_for_main = true
 reuse = true
 timeout_minutes = 5
 

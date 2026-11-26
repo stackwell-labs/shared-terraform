@@ -243,10 +243,15 @@ def check_include(where, include):
                           "(no '..', '.', or leading '/')")
         if zip_dir.split("/")[0] == BOOTSTRAP:
             raise Refusal(f"{where}: zip path {zip_dir!r} would collide with bootstrap")
-    dirs = sorted(include)
-    for a, b in zip(dirs, dirs[1:]):
-        if b.startswith(a + "/"):
-            raise Refusal(f"{where}: zip path {b!r} is inside {a!r}")
+    # Check every path's ancestors against the set, not sorted neighbours:
+    # '-' and '.' sort before '/', so a sibling like 'a-b' sits between 'a'
+    # and 'a/b' (shared-terraform#26).
+    for zip_dir in sorted(include):
+        parts = zip_dir.split("/")
+        for n in range(1, len(parts)):
+            outer = "/".join(parts[:n])
+            if outer in include:
+                raise Refusal(f"{where}: zip path {zip_dir!r} is inside {outer!r}")
     return include
 
 

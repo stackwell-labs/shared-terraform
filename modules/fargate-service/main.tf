@@ -352,10 +352,20 @@ data "aws_iam_policy_document" "secret_read" {
   }
 }
 
+# Skipped when secret_arns is empty: the statement would have no Resource, and
+# IAM refuses a statement without Resource or NotResource (shared-terraform#27).
 resource "aws_iam_role_policy" "secret_read" {
+  count  = length(var.secret_arns) > 0 ? 1 : 0
   name   = var.secret_read_policy_name
   role   = aws_iam_role.task_execution.id
   policy = data.aws_iam_policy_document.secret_read.json
+}
+
+# The policy had no count before shared-terraform#27; existing consumers' one
+# instance is [0] now, not a replacement.
+moved {
+  from = aws_iam_role_policy.secret_read
+  to   = aws_iam_role_policy.secret_read[0]
 }
 
 resource "aws_iam_role" "task" {

@@ -14,6 +14,6 @@ output "oidc_provider_arn" {
 }
 
 output "trust_subject_patterns" {
-  description = "The GitHub OIDC `sub` patterns this role's trust accepts: the plain `repo:org/name:...` and the immutable-ID `repo:org@*/name@*:...` form (see main.tf). Exposed for verification and for callers that assert on the trust surface."
+  description = "The GitHub OIDC `sub` values this role's trust accepts, matched exactly (StringEquals): the plain `repo:org/name:...` and the immutable-ID `repo:org@<owner_id>/name@<repo_id>:...` form (see main.tf). Exposed for verification and for callers that assert on the trust surface."
   value       = local.sub_patterns
 }

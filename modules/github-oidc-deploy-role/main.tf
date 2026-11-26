@@ -40,14 +40,15 @@ locals {
   # a transferred repo's deploy 403'd on AssumeRoleWithWebIdentity because only the
   # plain form was trusted.)
   #
-  # SAFE, not a blanket wildcard: `@*` wildcards ONLY the numeric id. The literal org
-  # and name segments stay fixed, and a GitHub org name cannot contain `@`, so no
-  # other org or repo can satisfy either pattern. `var.repo` must be plain `org/name`.
-  repo_parts = split("/", var.repo)
+  # Both are exact strings, matched with StringEquals: no wildcard anywhere. The
+  # immutable form takes the ids as inputs rather than `@*`, because in StringLike
+  # `*` matches any text, `/`, `:` and `@` included, so `org@*/name@*` also matched
+  # a sub template another repo in the org could set (shared-terraform#25).
   sub_patterns = [
     "repo:${var.repo}:ref:refs/heads/${var.branch}",
-    "repo:${local.repo_parts[0]}@*/${local.repo_parts[1]}@*:ref:refs/heads/${var.branch}",
+    "repo:${local.repo_parts[0]}@${var.owner_id}/${local.repo_parts[1]}@${var.repo_id}:ref:refs/heads/${var.branch}",
   ]
+  repo_parts = split("/", var.repo)
 }
 
 data "aws_iam_policy_document" "trust" {
@@ -64,8 +65,8 @@ data "aws_iam_policy_document" "trust" {
       values   = ["sts.amazonaws.com"]
     }
     condition {
-      # StringLike with multiple values is an OR: the token's sub need match only one.
-      test     = "StringLike"
+      # Multiple values are an OR: the token's sub need equal only one.
+      test     = "StringEquals"
       variable = "token.actions.githubusercontent.com:sub"
       values   = local.sub_patterns
     }
@@ -102,8 +103,8 @@ resource "aws_iam_role_policy" "scoped" {
 
 # Trust-policy self-management. This module OWNS and rewrites the role's
 # assume_role_policy (above): whenever the trust doc changes — e.g. the account
-# rolls to GitHub's immutable-ID `repo:org@*/name@*` sub form, or repo/branch
-# inputs change — `terraform apply` calls iam:UpdateAssumeRolePolicy on THIS role.
+# rolls to GitHub's immutable-ID `repo:org@<id>/name@<id>` sub form, or the
+# repo/branch/id inputs change — `terraform apply` calls iam:UpdateAssumeRolePolicy on THIS role.
 # Callers used to have to remember to grant that action in their own policy_json;
 # forgetting it deadlocked the deploy (the apply that would grant the permission
 # 403s on the very action it needs). Since the module owns the trust relationship,

@@ -1,6 +1,35 @@
 variable "repo" {
   description = "GitHub repository in owner/name form, e.g. stackwell-labs/granite. Only this repo's chosen branch can assume the role."
   type        = string
+
+  validation {
+    condition     = can(regex("^[A-Za-z0-9-]+/[A-Za-z0-9._-]+$", var.repo))
+    error_message = "repo must be <owner>/<name>, e.g. stackwell-labs/granite."
+  }
+}
+
+# The immutable-ID sub form names the owner and repo by GitHub's numeric ids, so the
+# trust can match it exactly (shared-terraform#25). Look them up with
+# `gh api repos/<owner>/<name> --jq '.owner.id, .id'`. The ids never change, even
+# when the repo is renamed or transferred.
+variable "owner_id" {
+  description = "GitHub's numeric id of the repo's owner (the org), as in the immutable-ID sub `repo:<owner>@<owner_id>/<name>@<repo_id>:...`. stackwell-labs is 290129483."
+  type        = number
+
+  validation {
+    condition     = var.owner_id > 0 && floor(var.owner_id) == var.owner_id
+    error_message = "owner_id must be a positive integer: gh api repos/<owner>/<name> --jq .owner.id"
+  }
+}
+
+variable "repo_id" {
+  description = "GitHub's numeric id of the repo, as in the immutable-ID sub `repo:<owner>@<owner_id>/<name>@<repo_id>:...`."
+  type        = number
+
+  validation {
+    condition     = var.repo_id > 0 && floor(var.repo_id) == var.repo_id
+    error_message = "repo_id must be a positive integer: gh api repos/<owner>/<name> --jq .id"
+  }
 }
 
 variable "branch" {

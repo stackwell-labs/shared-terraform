@@ -7,6 +7,8 @@ mock_provider "aws" {}
 
 variables {
   repo        = "stackwell-labs/drive"
+  owner_id    = 290129483
+  repo_id     = 123456789
   policy_json = "{\"Version\":\"2012-10-17\",\"Statement\":[]}"
 }
 

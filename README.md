@@ -198,9 +198,19 @@ module "ci_deploy" {
   source = "git::https://github.com/stackwell-labs/shared-terraform.git//modules/github-oidc-deploy-role?ref=v0.1.0"
 
   repo        = "stackwell-labs/granite"
+  owner_id    = 290129483 # gh api repos/stackwell-labs/granite --jq .owner.id
+  repo_id     = 123456789 # gh api repos/stackwell-labs/granite --jq .id
   policy_json = data.aws_iam_policy_document.deploy_scoped.json
 }
 ```
+
+The trust accepts the branch's OIDC `sub` in both forms GitHub emits, each
+matched exactly (`StringEquals`): `repo:<owner>/<name>:ref:refs/heads/<branch>`
+and the immutable-ID `repo:<owner>@<owner_id>/<name>@<repo_id>:ref:...`.
+`owner_id` and `repo_id` are required since v0.22.0 (shared-terraform#25).
+Before that the immutable form was `<owner>@*/<name>@*`. In `StringLike`, `*`
+matches any text, so another repo in the org could set a sub template that
+matched it and assume the role. Callers on an older version should bump.
 
 In an account that already has the GitHub OIDC provider, set
 `create_oidc_provider = false` and pass `oidc_provider_arn`.

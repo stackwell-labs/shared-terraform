@@ -954,6 +954,14 @@ class ManifestTest(unittest.TestCase):
     def test_include_paths_may_not_nest(self):
         self.refuse(self.include('{ "a" = "x", "a/b" = "y" }'), "zip path 'a/b' is inside 'a'")
 
+    def test_include_paths_may_not_nest_past_a_sibling(self):
+        # 'a-b' sorts between 'a' and 'a/b' (shared-terraform#26).
+        self.refuse(self.include('{ "a" = "x", "a-b" = "z", "a/b" = "y" }'),
+                    "zip path 'a/b' is inside 'a'")
+
+    def test_include_paths_may_not_nest_deeper(self):
+        self.refuse(self.include('{ "a" = "x", "a/b/c" = "y" }'), "zip path 'a/b/c' is inside 'a'")
+
     def test_include_must_be_a_table(self):
         self.refuse(self.include('"web"'), "include must be a non-empty dict")
 
